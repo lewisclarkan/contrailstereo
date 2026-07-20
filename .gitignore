@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+*.egg-info/
+
+data/
+outputs/
+era5_cache/
+maps_v4/
+curves_v3/
+*.nc
+*.csv
+
+.DS_Store
