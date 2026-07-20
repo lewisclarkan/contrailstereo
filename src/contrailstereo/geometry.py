@@ -59,7 +59,8 @@ def vza_deg(lat_pt, lon_pt, sat_lon):
     lam = np.deg2rad(sat_lon)
     v = np.array([SAT_R * np.cos(lam) - X, SAT_R * np.sin(lam) - Y, -Z])
     up = np.array([X, Y, Z]) / np.linalg.norm([X, Y, Z])
-    return float(np.degrees(np.arccos(np.dot(v / np.linalg.norm(v), up))))
+    c = np.clip(np.dot(v / np.linalg.norm(v), up), -1.0, 1.0)
+    return float(np.degrees(np.arccos(c)))
 
 
 def parallax_displacement_km(lat, lon, h_km, sat_lon):
