@@ -3,7 +3,7 @@ __pycache__/
 .ipynb_checkpoints/
 *.egg-info/
 
-data/
+/data/
 outputs/
 era5_cache/
 maps_v4/
