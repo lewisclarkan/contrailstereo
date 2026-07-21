@@ -33,8 +33,11 @@ def _download(sat, ch, when):
 
 
 def _plain_encoding(ds):
-    for name in list(ds.variables):
-        ds[name].encoding = {}
+    for name, var in ds.variables.items():
+        if (np.issubdtype(var.dtype, np.datetime64)
+                or np.issubdtype(var.dtype, np.timedelta64)):
+            continue
+        var.encoding = {}
     return ds
 
 

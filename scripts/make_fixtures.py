@@ -45,7 +45,7 @@ for si in FIXTURES:
     d = os.path.join(OUT, f"scene_{si:04d}")
     os.makedirs(d, exist_ok=True)
 
-    when = row.time.to_pydatetime()
+    when = row.time.floor("s").to_pydatetime()
     for sat in (16, 17):
         fields, domain = fetch_pair(when, sat)
         for ch in (14, 15):
