@@ -35,7 +35,7 @@ def run_summary(scene_df, save=None):
     fig.tight_layout()
     if save:
         fig.savefig(save, dpi=150); plt.close(fig)
-    return fig
+    return
 
 
 def map_scatter(profile_df, gate=0.6, bias_correct=True, save=None):
@@ -63,7 +63,7 @@ def map_scatter(profile_df, gate=0.6, bias_correct=True, save=None):
     fig.tight_layout()
     if save:
         fig.savefig(save, dpi=150); plt.close(fig)
-    return fig
+    return
 
 
 def tradeoff_plot(profile_df, gates=np.arange(0.3, 0.86, 0.05), save=None):
@@ -88,4 +88,4 @@ def tradeoff_plot(profile_df, gates=np.arange(0.3, 0.86, 0.05), save=None):
     fig.tight_layout()
     if save:
         fig.savefig(save, dpi=150); plt.close(fig)
-    return fig
+    return

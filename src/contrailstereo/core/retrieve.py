@@ -164,7 +164,9 @@ def run_scene(sd: SceneData, cfg: StereoConfig = DEFAULT, do_map=True):
                            sd.offset_s, coverage_ok,
                            rec["wind_applied"], rec["wind_resid_km"], cfg)
 
-    grids = None
+    extras = dict(hs=hs, curve=curve, glat=glat, glon=glon,
+                  Hq=None, rmax=None)
+
     prof_out = None
     if do_map:
         hs_adm = hs[adm]
@@ -188,5 +190,6 @@ def run_scene(sd: SceneData, cfg: StereoConfig = DEFAULT, do_map=True):
                    map_coverage=float(np.isfinite(Hq).mean()),
                    map_bias=float(d.mean()) if len(d) else np.nan,
                    map_scatter=float(d.std()) if len(d) else np.nan)
-        grids = (glat, glon, Hq, rmax)
-    return rec, prof_out, grids
+        extras.update(Hq=Hq, rmax=rmax)
+
+    return rec, prof_out, extras

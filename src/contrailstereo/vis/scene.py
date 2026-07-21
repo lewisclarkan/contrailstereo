@@ -27,7 +27,7 @@ def curve_plot(extras, rec, truth_km=None, save=None):
     ax.legend(fontsize=7); fig.tight_layout()
     if save:
         fig.savefig(save, dpi=130); plt.close(fig)
-    return fig
+    return
 
 
 def map_panel(extras, pr, rec, scene_idx, save=None):
@@ -60,4 +60,4 @@ def map_panel(extras, pr, rec, scene_idx, save=None):
     fig.tight_layout()
     if save:
         fig.savefig(save, dpi=130); plt.close(fig)
-    return fig
+    return
