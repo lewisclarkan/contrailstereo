@@ -10,7 +10,7 @@ from scipy.ndimage import gaussian_filter
 from ..config import R_EQ, R_POL
 
 
-def mask_sampler(ds14, ds15):
+def make_sampler(ds14, ds15):
     """Bilinear sampler of the C14-C15 BTD on one satellite's grid
     
     Returns f(glat, glon) -> BTD [K]; NaN outside the sector"""
@@ -19,7 +19,7 @@ def mask_sampler(ds14, ds15):
     sat_lon = float(pj.attrs["longitude_of_projection_origin"])
     H = float(pj.attrs["perspective_point_height"])
 
-    p = Proj(proj="goes", h=H, lon_0=sat_lon, sweep=pj.attrs.get("sweep_angle_axis", "x"), a=R_EQ, b=R_POL)
+    p = Proj(proj="geos", h=H, lon_0=sat_lon, sweep=pj.attrs.get("sweep_angle_axis", "x"), a=R_EQ, b=R_POL)
 
     d14 = ds14["CMI"].assign_coords(x=ds14.x * H, y=ds14.y * H)
     d15 = ds15["CMI"].assign_coords(x=ds15.x * H, y=ds15.y * H)

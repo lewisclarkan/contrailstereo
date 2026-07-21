@@ -11,4 +11,6 @@ curves_v3/
 *.nc
 *.csv
 
+!tests/fixtures/**
+
 .DS_Store
