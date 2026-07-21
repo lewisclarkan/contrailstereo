@@ -84,7 +84,7 @@ def cmd_run(args):
             continue
         try:
             sd = load_scene(row, prof_df, cfg)
-            rec, pr, grids = run_scene(sd, cfg, do_map=not args.no_map)
+            rec, pr, extras = run_scene(sd, cfg, do_map=not args.no_map)
         except Exception as e:                          # noqa: BLE001
             print(f"[{i + 1:3d}/{n_total}] FAILED: {type(e).__name__}: {e}")
             traceback.print_exc(limit=3)
@@ -108,9 +108,9 @@ def cmd_run(args):
             pd.concat(pp_frames, ignore_index=True).to_csv(
                 args.profiles_out, index=False)
 
-        if args.maps and grids is not None:
-            from .viz.scene import map_panel            # lazy: matplotlib
-            map_panel(grids, pr, rec, i,
+        if args.maps and extras["Hq"] is not None:
+            from .vis.scene import map_panel            # lazy: matplotlib
+            map_panel(extras, pr, rec, i,
                       save=os.path.join(args.maps_dir, f"scene_{i:04d}.png"))
 
     if not rows:
