@@ -54,7 +54,13 @@ def _summary(out, pp, cfg):
 
 
 def cmd_run(args):
+
+    from dataclasses import replace
     cfg = DEFAULT
+    if args.channels:
+        a, b = (int(x) for x in args.channels.split(","))
+        cfg = replace(cfg, match_channels=(a, b))
+
     scenes, prof_df = build_scene_table(args.nc)
     scenes = scenes.head(args.n)
     n_total = len(scenes)
@@ -137,6 +143,8 @@ def main():
     r.add_argument("--no-map", action="store_true",
                    help="skip the map cube entirely (scene scalars only)")
     r.add_argument("--no-resume", action="store_true")
+    r.add_argument("--channels", default=None,
+                   help="matching BTD pair, e.g. 13,15 (default: config)")
     r.set_defaults(func=cmd_run)
 
     args = ap.parse_args()

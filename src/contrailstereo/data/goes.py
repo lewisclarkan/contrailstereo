@@ -51,16 +51,18 @@ def fetch_channel(sat, ch, when, cfg: StereoConfig = DEFAULT):
     return ds
 
 
-def fetch_pair(when, sat, cfg: StereoConfig = DEFAULT):
-    """C14 + C15 for one satellite.
+def fetch_pair(when, sat, cfg: StereoConfig = DEFAULT, channels=None):
+    """Fetch a pair of channels for one satellite 
+    (cfg.match_channels unless overridden).
 
     Returns
     -------
-    fields : {14: Dataset, 15: Dataset}
+    fields : {channels[0]: Dataset, channels[1]: Dataset}
     domain : "C" or "F" (whichever the C14 fetch used)
     """
-    fields = {ch: fetch_channel(sat, ch, when, cfg) for ch in (14, 15)}
-    return fields, fields[14].attrs.get("cstereo_domain", "?")
+    channels = channels or cfg.match_channels
+    fields = {ch: fetch_channel(sat, ch, when, cfg) for ch in channels}
+    return fields, fields[channels[0]].attrs.get("cstereo_domain", "?")
 
 
 # Striping for G17

@@ -58,9 +58,13 @@ def load_scene(row, prof_df, cfg: StereoConfig = DEFAULT) -> SceneData:
     when = row.time.floor("s").to_pydatetime()
     pr = prof_df[prof_df.goes_file == row.goes_file].sort_values("lat").copy()
     fields, domains, times = {}, {}, {}
+
+    a, b = cfg.match_channels
+
     for sat in (cfg.sat_east, cfg.sat_west):
         fields[sat], domains[sat] = fetch_pair(when, sat, cfg)
-        times[sat] = np.datetime64(fields[sat][14].t.values)
+        times[sat] = np.datetime64(fields[sat][a].t.values)
+
     offset = float((times[cfg.sat_west] - times[cfg.sat_east])
                    / np.timedelta64(1, "s"))
     winds = None
@@ -96,14 +100,15 @@ def run_scene(sd: SceneData, cfg: StereoConfig = DEFAULT, do_map=True):
         return rec, None, None
 
     # striping: masked west view is primary when cfg says so
-    score = row_artifact_scores(sd.fields[W][14], sd.fields[W][15])
+    a, b = cfg.match_channels
+    score = row_artifact_scores(sd.fields[W][a], sd.fields[W][b])
     bad = flag_rows(score, cfg)
     rec.update(g17_stripe=float(np.nanmax(score)), n_rows_masked=int(bad.size))
-    west14, west15 = sd.fields[W][14], sd.fields[W][15]
+    west1, west2 = sd.fields[W][a], sd.fields[W][b]
     if cfg.stripe_mask_primary and bad.size:
-        west14, west15 = masked_copy(west14, bad), masked_copy(west15, bad)
-    samplers = {E: make_sampler(sd.fields[E][14], sd.fields[E][15]),
-                W: make_sampler(west14, west15)}
+        west1, west2 = masked_copy(west1, bad), masked_copy(west2, bad)
+    samplers = {E: make_sampler(sd.fields[E][a], sd.fields[E][b]),
+                W: make_sampler(west1, west2)}
 
     glat, glon, px = build_grid(sd.profiles, cfg)
     sig, win = km_filters(px, cfg)

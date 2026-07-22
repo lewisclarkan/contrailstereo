@@ -25,6 +25,9 @@ class StereoConfig:
     # Satellites
     sat_east: int = 16
     sat_west: int = 17
+    match_channels: tuple = (13, 15) # BTD pair used for matching
+                                     # (14,15) = testing candidate
+                                     # (13,15) = default candidate
 
     # Grid 
     px_km: float = 1.0
