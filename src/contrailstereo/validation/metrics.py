@@ -145,3 +145,17 @@ def bias_correct_cv(profile_df, gate=0.6, k=5, seed=0):
     return dict(gate=gate, n=len(resid), k=k,
                 rmse_cv_corrected=_rmse(resid),
                 constant=float(q.groupby("scene").e.mean().mean()))
+
+
+def bias_correct_cv_ci(profile_df, gate=0.6, n_boot=500, seed=0):
+    pp = _load(profile_df).dropna(subset=["h_map"])
+    pp = pp[pp.r_map > gate]
+    sc = pp.scene.unique()
+    rng = np.random.default_rng(seed)
+    stats = []
+    for _ in range(n_boot):
+        pick = rng.choice(sc, sc.size)
+        boot = pd.concat([pp[pp.scene == s] for s in pick])
+        stats.append(bias_correct_cv(boot, gate=gate)["rmse_cv_corrected"])
+    return (float(np.percentile(stats, 2.5)),
+            float(np.percentile(stats, 97.5)))
