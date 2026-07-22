@@ -14,9 +14,9 @@ def load_fixture_scene(scene_idx):
     meta = json.load(open(os.path.join(d, "meta.json")))
     fields = {sat: {ch: xr.open_dataset(
                   os.path.join(d, f"G{sat}_C{ch:02d}.nc"))
-                  for ch in (14, 15)} for sat in (16, 17)}
-    t16 = np.datetime64(fields[16][14].t.values)
-    t17 = np.datetime64(fields[17][14].t.values)
+                  for ch in (13, 15)} for sat in (16, 17)}
+    t16 = np.datetime64(fields[16][13].t.values)
+    t17 = np.datetime64(fields[17][13].t.values)
     winds = None
     wp = os.path.join(d, "era5.npz")
     if os.path.exists(wp):

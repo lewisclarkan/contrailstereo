@@ -55,4 +55,4 @@ def test_live_fetch_one_scene():
     fields, domain = __import__(
         "contrailstereo.data.goes", fromlist=["fetch_pair"]
     ).fetch_pair(dt.datetime(2021, 4, 14, 10, 6), 16)
-    assert 14 in fields and 15 in fields and domain in ("C", "F")
+    assert 13 in fields and 15 in fields and domain in ("C", "F")

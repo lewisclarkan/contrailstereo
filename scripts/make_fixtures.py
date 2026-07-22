@@ -48,7 +48,7 @@ for si in FIXTURES:
     when = row.time.floor("s").to_pydatetime()
     for sat in (16, 17):
         fields, domain = fetch_pair(when, sat)
-        for ch in (14, 15):
+        for ch in (13, 15):
             crop = crop_to_grid(fields[ch], glat, glon)
             crop.to_netcdf(os.path.join(d, f"G{sat}_C{ch:02d}.nc"),
                            encoding={"CMI": {"zlib": True, "complevel": 6}})
