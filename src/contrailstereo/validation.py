@@ -308,8 +308,20 @@ def assign_split(ids, holdout_frac=0.3, salt=SPLIT_SALT) -> pd.Series:
     return pd.Series(out, name="split")
 
 
-def select(cases, split="dev", n=None, holdout_frac=0.3):
-    """Cases in a split ('dev' | 'holdout' | 'all'), in their given order."""
+def select(cases, split="dev", n=None, holdout_frac=0.3, max_vza=None,
+           sats=(16, 17)):
+    """Cases in a split ('dev' | 'holdout' | 'all'), in their given order.
+
+    max_vza : keep only cases whose anchor is seen by every satellite in
+              `sats` at a viewing zenith angle <= max_vza [deg]. Pure
+              geometry, decided before running, so every variant in a
+              comparison gets the same domain.
+    """
+    if max_vza is not None:
+        from .config import SAT_LON
+        from .geometry import vza_deg
+        cases = [c for c in cases
+                 if max(vza_deg(*c.anchor, SAT_LON[s]) for s in sats) <= max_vza]
     if split != "all":
         lab = assign_split([c.id for c in cases], holdout_frac)
         cases = [c for c in cases if lab[c.id] == split]
@@ -325,8 +337,11 @@ def _usable(run: Run, qc) -> pd.Series:
 
 
 def _case_sums(run: Run, ids, gate, qc):
-    """Arrays aligned with ids: n_all (truth points), and n, S1, S2 of
-    error (h - top) over points passing the gate in usable cases."""
+    """Arrays aligned with ids:
+        n_all : truth points in the case
+        n_use : truth points in the case if it is usable, else 0
+        n, S1, S2 : count, sum and sum of squares of error (h - top) over
+                    points passing the gate in usable cases."""
     if run.profiles is None:
         raise ValueError(f"run {run.name!r} has no truth profiles")
     use = _usable(run, qc)
@@ -338,7 +353,9 @@ def _case_sums(run: Run, ids, gate, qc):
                           S1=np.where(ok, e, 0.0), S2=np.where(ok, e * e, 0.0)))
     g = d.groupby("case_id")[["one", "n", "S1", "S2"]].sum().reindex(ids,
                                                                     fill_value=0)
-    return dict(n_all=g.one.values, n=g.n.values, S1=g.S1.values,
+    usable = pd.Series(ids).map(use).fillna(False).values.astype(bool)
+    return dict(n_all=g.one.values, n_use=np.where(usable, g.one.values, 0.0),
+                n=g.n.values, S1=g.S1.values,
                 S2=g.S2.values)
 
 
@@ -406,7 +423,9 @@ def summary(run: Run, gate=0.6, qc=(QC_OK,), n_boot=0, seed=0) -> dict:
     """Accuracy of one run against truth.
 
     n_cases/n_usable : cases completed / with qc in `qc`
-    coverage         : gated points / all truth points (usable or not)
+    yield            : n_usable / n_cases -- cases lost to data or geometry
+    coverage         : gated points / truth points IN USABLE CASES -- pixels
+                       lost within cases the retrieval could attempt
     bias, rmse_raw, rmse_corr, within (matching precision inside a case),
     between (case-to-case offset spread), r2 (per-point, Meijer-comparable)
     With n_boot > 0, adds <metric>_ci from a case bootstrap.
@@ -426,7 +445,9 @@ def summary(run: Run, gate=0.6, qc=(QC_OK,), n_boot=0, seed=0) -> dict:
           if ss_tot > 0 else np.nan)
     out = dict(gate=gate, n_cases=len(ids), n_usable=int(use.reindex(ids).sum()),
                n_cases_scored=int((s["n"] > 0).sum()),
-               coverage=float(s["n"].sum() / max(s["n_all"].sum(), 1)),
+               **{"yield": float(use.reindex(ids).mean()) if ids else np.nan},
+               coverage=float(s["n"].sum() / s["n_use"].sum())
+               if s["n_use"].sum() else np.nan,
                r2=float(r2), **m)
     if n_boot:
         Wb = _boot_weights(len(ids), n_boot, seed)
@@ -440,6 +461,37 @@ def gate_ladder(run: Run, gates=(0.5, 0.6, 0.7), qc=(QC_OK,)) -> pd.DataFrame:
     """Quality/coverage trade-off across r gates; reports scored cases per
     gate so a few-case ladder is not mistaken for a population result."""
     return pd.DataFrame([summary(run, g, qc) for g in gates]).set_index("gate")
+
+
+def case_table(run: Run, gate=0.6, qc=(QC_OK,)) -> pd.DataFrame:
+    """Per-case accuracy, sorted by share of the run's squared corrected
+    error (largest first) -- where the error actually comes from.
+
+    n, bias (mean error), sd (within-case scatter), offset (bias minus the
+    leave-one-case-out constant: this case's contribution to 'between'),
+    sse_share (share of total squared corrected error), plus qc, scene and
+    vza_max where available.
+    """
+    cs = run.cases[run.cases.qc != QC_ERROR]
+    ids = list(cs.case_id)
+    s = _case_sums(run, ids, gate, qc)
+    W1 = np.ones((1, len(ids)))
+    c = _loo_const(W1, s["S1"], s["n"])[0]
+    n, S1, S2 = s["n"], s["S1"], s["S2"]
+    c0 = np.nan_to_num(c)
+    sse = S2 - 2 * c0 * S1 + n * c0**2
+    t = pd.DataFrame(dict(case_id=ids, n=n.astype(int),
+                          bias=_div(S1, n),
+                          sd=np.sqrt(np.clip(_div(S2 - np.nan_to_num(
+                              _div(S1**2, n)), n), 0, None)),
+                          offset=_div(S1, n) - c,
+                          sse_share=sse / sse[n > 0].sum() if (n > 0).any()
+                          else np.nan))
+    extra = [k for k in ("scene", "qc", "vza_max", "map_coverage")
+             if k in cs.columns]
+    t = t.merge(cs[["case_id"] + extra], on="case_id", how="left")
+    return (t[t.n > 0].sort_values("sse_share", ascending=False)
+            .reset_index(drop=True))
 
 
 # ======================================================================
@@ -480,6 +532,7 @@ def pair(run_a: Run, run_b: Run, gate=0.6, qc=(QC_OK,), ids=None) -> Paired:
     for tag, r in (("A", run_a), ("B", run_b)):
         s = _case_sums(r, common, gate, qc)
         A["n_all"] = s["n_all"]
+        A[f"nuse{tag}"] = s["n_use"]
         A[f"n{tag}"], A[f"S1{tag}"], A[f"S2{tag}"] = s["n"], s["S1"], s["S2"]
 
     ua, ub = _usable(run_a, qc), _usable(run_b, qc)
@@ -516,8 +569,8 @@ def pair(run_a: Run, run_b: Run, gate=0.6, qc=(QC_OK,), ids=None) -> Paired:
         t[f"map_mean_{tag}"] = _div(S1, A["nC"])
         t[f"map_off_{tag}"] = t[f"map_mean_{tag}"] - c
     t["d_abs_off"] = t.map_off_b.abs() - t.map_off_a.abs()
-    t["cov_a"] = _div(A["nA"], A["n_all"])
-    t["cov_b"] = _div(A["nB"], A["n_all"])
+    t["cov_a"] = _div(A["nA"], A["nuseA"])
+    t["cov_b"] = _div(A["nB"], A["nuseB"])
     return Paired(run_a.variant, run_b.variant, gate, tuple(qc) if qc else (),
                   t, A, n_error)
 
@@ -528,8 +581,8 @@ def _metric_set(P: Paired, W, eval_mask=None) -> dict:
     Wm = W if eval_mask is None else W * eval_mask[None, :]
     out = {"yield": (_div(Wm @ X["useA"], Wm.sum(1)),
                      _div(Wm @ X["useB"], Wm.sum(1))),
-           "coverage (own)": (_div(Wm @ X["nA"], Wm @ X["n_all"]),
-                              _div(Wm @ X["nB"], Wm @ X["n_all"]))}
+           "coverage (own)": (_div(Wm @ X["nA"], Wm @ X["nuseA"]),
+                              _div(Wm @ X["nB"], Wm @ X["nuseB"]))}
     oa = _metrics(W, X["nA"], X["S1A"], X["S2A"], eval_mask)
     ob = _metrics(W, X["nB"], X["S1B"], X["S2B"], eval_mask)
     for k in ("bias", "rmse_corr"):

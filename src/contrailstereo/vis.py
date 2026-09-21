@@ -1,4 +1,14 @@
-"""Figures"""
+"""Figures. Every function returns a matplotlib Figure (and saves it if
+`save` is given); nothing here computes results -- it plots Results, Runs
+and comparisons produced elsewhere.
+
+Case      map_panel(result, truth)
+Run       truth_scatter(run), gate_tradeoff(run), run_overview(run)
+Compare   forest(table), case_scatter(paired), strata(table), flips(crosstab)
+
+Maps use pcolormesh on the grid's own lat/lon, so they work on any grid
+kind (not only regular lat/lon).
+"""
 
 from __future__ import annotations
 
@@ -126,7 +136,7 @@ def truth_scatter(run: V.Run, gate=0.6, qc=(QC_OK,), lims=(7.0, 16.0),
                                      else "") + " [km]")
     ax.text(0.03, 0.97,
             f"n = {int(s['n'])} ({s['n_cases_scored']} cases)\n"
-            f"coverage {s['coverage']:.2f}\n"
+            f"yield {s['yield']:.2f}, coverage {s['coverage']:.2f}\n"
             f"bias {s['bias']:+.2f} km\n"
             f"RMSE raw {s['rmse_raw']:.2f}, corr {s['rmse_corr']:.2f} km\n"
             f"within {s['within']:.2f}, between {s['between']:.2f} km",

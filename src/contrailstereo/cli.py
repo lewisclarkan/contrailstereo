@@ -1,4 +1,4 @@
-"""Command line interface.
+"""contrailstereo: geostationary stereo heights for contrails and thin cirrus.
 
     contrailstereo run      [--config F] [--set k=v ...] [--split dev] [--n N]
     contrailstereo run      --time T --bbox LAT0 LAT1 LON0 LON1   (no truth)
@@ -53,13 +53,14 @@ def _name(spec, overrides):
     return f"{stem}+{ov}" if stem else ov
 
 
-def _cases(args, paths):
+def _cases(args, paths, sats=(DEFAULT.sat_east, DEFAULT.sat_west)):
     from .data.caliop import load_cases
     nc = args.collocations or paths.collocations
     if nc is None:
         sys.exit("no collocations file: pass --collocations or set it in "
                  "[paths] / CONTRAILSTEREO_COLLOCATIONS")
-    return V.select(load_cases(nc), args.split, n=args.n)
+    return V.select(load_cases(nc), args.split, n=args.n, max_vza=args.max_vza,
+                    sats=tuple(sats))
 
 
 def _qc(s):
@@ -77,6 +78,8 @@ def _add_common(p):
                    "(default: from paths)")
     p.add_argument("--split", default="dev", choices=("dev", "holdout", "all"))
     p.add_argument("--n", type=int, default=None, help="first N cases only")
+    p.add_argument("--max-vza", type=float, default=None,
+                   help="keep cases seen by both satellites at VZA <= this [deg]")
     p.add_argument("--gate", type=float, default=0.6, help="r gate for metrics")
     p.add_argument("--qc", default=QC_OK,
                    help="verdicts that count, comma-separated, or 'all'")
@@ -129,7 +132,7 @@ def cmd_run(args):
         print(f"map: {out / (v.tag + '_maps')}")
         return 0 if c.qc != "error" else 1
 
-    cases = _cases(args, paths)
+    cases = _cases(args, paths, (cfg.sat_east, cfg.sat_west))
     runs = V.run(cases, [v], out, paths=paths, validate=not args.no_validate,
                  save_maps=args.maps, resume=not args.no_resume,
                  index=args.index, frame_loader=FRAME_LOADER,
@@ -169,7 +172,8 @@ def cmd_compare(args):
     print(f"A = {va.tag}\nB = {vb.tag}")
     for k, a, b in diff(ca, cb):
         print(f"  {k}: {a} -> {b}")
-    cases = _cases(args, paths)
+    cases = _cases(args, paths, {ca.sat_east, ca.sat_west, cb.sat_east,
+                                 cb.sat_west})
     runs = V.run(cases, [va, vb], out, paths=paths, index=args.index,
                  frame_loader=FRAME_LOADER, verbose=not args.quiet)
     ids = [c.id for c in cases]
