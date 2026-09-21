@@ -4,17 +4,32 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "contrailstereo"
-version = "0.1.0"
-description = "Stereoscopic contrail height estimation and tracking"
-requires-python = ">=3.11"
-dependencies = []        
+version = "0.2.0"
+description = "Geostationary stereo height retrieval for contrails and thin cirrus (GOES East/West parallax)"
+readme = "README.md"
+requires-python = ">=3.11"          # tomllib
+authors = [{ name = "Lewis Clark" }]
+dependencies = [
+    "numpy>=1.26",
+    "pandas>=2.1",
+    "scipy>=1.11",
+    "xarray>=2023.10",
+    "netCDF4>=1.6",
+    "pyproj>=3.6",
+    "matplotlib>=3.8",
+    "goes2go>=2023.8",               # GOES download (imported only on cache miss)
+    "cdsapi>=0.7.2",                 # ERA5 download (imported only on cache miss)
+]
+
+[project.optional-dependencies]
+notebooks = ["jupyterlab", "ipykernel", "cartopy"]
+dev = ["pytest"]
+
+[project.scripts]
+contrailstereo = "contrailstereo.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["network: requires GOES/ERA5 access; excluded in CI"]
-
-[project.scripts]
-contrailstereo = "contrailstereo.cli:main"
