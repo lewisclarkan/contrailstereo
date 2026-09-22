@@ -47,7 +47,8 @@ from .types import QC_DATA_INVALID, QC_ERROR, QC_OK, Case, Result
 log = logging.getLogger(__name__)
 
 SPLIT_SALT = "contrailstereo-split-v1"
-PROFILE_COLS = ["case_id", "pid", "lat", "lon", "top_km", "h", "r"]
+PROFILE_COLS = ["case_id", "pid", "contrail", "lat", "lon", "top_km", "h", "r", "s_eff"]
+CONTRAIL_GAP_KM = 5.0     # consecutive truth points further apart start a new contrail
 
 
 # ======================================================================
@@ -118,6 +119,9 @@ def load_run(out_dir, variant: Variant) -> Run:
     profiles = None
     if pp.exists():
         profiles = pd.read_csv(pp)
+        for col in ("s_eff", "contrail"):
+            if col not in profiles:
+                profiles[col] = np.nan
         profiles = (profiles[profiles.case_id.isin(cases.case_id)]
                     .drop_duplicates(["case_id", "pid"], keep="last"))
         profiles = profiles.reset_index(drop=True)
@@ -127,14 +131,28 @@ def load_run(out_dir, variant: Variant) -> Run:
 # ======================================================================
 # Truth
 # ======================================================================
+def contrail_ids(lat, lon, pid, gap_km=CONTRAIL_GAP_KM):
+    """Contrail index per truth point: contiguous runs along the lidar track
+    (in pid order), split where consecutive points are > gap_km apart."""
+    lat, lon, pid = (np.asarray(a) for a in (lat, lon, pid))
+    o = np.argsort(pid)
+    seg = np.r_[0, np.cumsum(_gap_km(lat[o], lon[o]) > gap_km)]
+    out = np.empty(lat.size, int)
+    out[o] = seg
+    return out
+
+
 def attach_truth(result: Result, case: Case, index="nearest") -> pd.DataFrame:
-    """Sample the result at the case's truth points (PROFILE_COLS)."""
+    """Sample the result at the case's truth points (PROFILE_COLS): height,
+    r, s_eff, and the contrail each point belongs to."""
     t = case.truth
     s = sample_at(result, t.lat, t.lon, index=index)
     return pd.DataFrame(dict(case_id=case.id, pid=t.index.values,
+                             contrail=contrail_ids(t.lat.values, t.lon.values,
+                                                   t.index.values),
                              lat=t.lat.values, lon=t.lon.values,
                              top_km=t.top_km.values, h=s.h.values,
-                             r=s.r.values))
+                             r=s.r.values, s_eff=s.s_eff.values))
 
 
 def _save_map(path: Path, result: Result):
@@ -291,7 +309,11 @@ def load_legacy_run(results_csv, profiles_csv, cases, name="v4") -> Run:
     if n_miss > 0.01 * len(old):
         log.warning("legacy import: %d truth points without a legacy match",
                     n_miss)
-    prof = m.rename(columns=dict(h_map="h", r_map="r"))[PROFILE_COLS]
+    m = m.rename(columns=dict(h_map="h", r_map="r")).assign(s_eff=np.nan)
+    m["contrail"] = 0
+    for cid, g in m.groupby("case_id"):
+        m.loc[g.index, "contrail"] = contrail_ids(g.lat.values, g.lon.values, g.pid.values)
+    prof = m[PROFILE_COLS]
     return Run(Variant(name, None), cases_df, prof.reset_index(drop=True))
 
 
@@ -309,13 +331,18 @@ def assign_split(ids, holdout_frac=0.3, salt=SPLIT_SALT) -> pd.Series:
 
 
 def select(cases, split="dev", n=None, holdout_frac=0.3, max_vza=None,
-           sats=(16, 17)):
-    """Cases in a split ('dev' | 'holdout' | 'all'), in their given order.
+           sats=(16, 17), order="random"):
+    """Cases in a split ('dev' | 'holdout' | 'all').
 
+    order : "random" (default) -- a fixed pseudo-random order (hash of the
+            case id, with a different salt from the split), so the first n
+            cases are a REPRESENTATIVE subset and the same on every run.
+            "table" -- the input order. For CALIOP cases that is profile
+            count, largest first, so the first n are the largest cases.
     max_vza : keep only cases whose anchor is seen by every satellite in
-              `sats` at a viewing zenith angle <= max_vza [deg]. Pure
-              geometry, decided before running, so every variant in a
-              comparison gets the same domain.
+              `sats` at a viewing zenith angle <= max_vza [deg].
+
+    Scene numbers are unaffected (they live in case.meta["scene"]).
     """
     if max_vza is not None:
         from .config import SAT_LON
@@ -325,7 +352,12 @@ def select(cases, split="dev", n=None, holdout_frac=0.3, max_vza=None,
     if split != "all":
         lab = assign_split([c.id for c in cases], holdout_frac)
         cases = [c for c in cases if lab[c.id] == split]
-    return cases[:n] if n else list(cases)
+    if order == "random":
+        key = lambda c: hashlib.sha256(f"{SPLIT_SALT}:order:{c.id}".encode()).hexdigest()
+        cases = sorted(cases, key=key)
+    elif order != "table":
+        raise ValueError(f"unknown order {order!r}")
+    return list(cases[:n]) if n else list(cases)
 
 
 # ======================================================================
@@ -336,7 +368,18 @@ def _usable(run: Run, qc) -> pd.Series:
     return q.isin(qc) if qc is not None else ~q.isin([QC_ERROR])
 
 
-def _case_sums(run: Run, ids, gate, qc):
+def _passes(p, gate, s_min=0.0):
+    """Truth points passing the r gate and (if s_min > 0) the s_eff gate."""
+    ok = np.isfinite(p.h.values) & (p.r.values > gate)
+    if s_min and s_min > 0:
+        if "s_eff" not in p or p.s_eff.isna().all():
+            raise ValueError("s_min > 0 needs s_eff in the profiles "
+                             "(runs made before s_eff was stored)")
+        ok &= p.s_eff.values >= s_min
+    return ok
+
+
+def _case_sums(run: Run, ids, gate, qc, s_min=0.0):
     """Arrays aligned with ids:
         n_all : truth points in the case
         n_use : truth points in the case if it is usable, else 0
@@ -347,7 +390,7 @@ def _case_sums(run: Run, ids, gate, qc):
     use = _usable(run, qc)
     p = run.profiles
     e = (p.h - p.top_km).values
-    ok = np.isfinite(e) & (p.r.values > gate) & p.case_id.map(use).fillna(
+    ok = _passes(p, gate, s_min) & p.case_id.map(use).fillna(
         False).values.astype(bool)
     d = pd.DataFrame(dict(case_id=p.case_id, one=1.0, n=ok.astype(float),
                           S1=np.where(ok, e, 0.0), S2=np.where(ok, e * e, 0.0)))
@@ -419,7 +462,7 @@ def _ci(x, ci=95):
 # ======================================================================
 # Single run
 # ======================================================================
-def summary(run: Run, gate=0.6, qc=(QC_OK,), n_boot=0, seed=0) -> dict:
+def summary(run: Run, gate=0.6, qc=(QC_OK,), n_boot=0, seed=0, s_min=0.0) -> dict:
     """Accuracy of one run against truth.
 
     n_cases/n_usable : cases completed / with qc in `qc`
@@ -432,18 +475,17 @@ def summary(run: Run, gate=0.6, qc=(QC_OK,), n_boot=0, seed=0) -> dict:
     """
     cs = run.cases[run.cases.qc != QC_ERROR]
     ids = list(cs.case_id)
-    s = _case_sums(run, ids, gate, qc)
+    s = _case_sums(run, ids, gate, qc, s_min)
     W1 = np.ones((1, len(ids)))
     m = {k: float(v[0]) for k, v in _metrics(W1, s["n"], s["S1"], s["S2"]).items()}
     p = run.profiles
     use = _usable(run, qc)
-    q = p[p.case_id.map(use).fillna(False).astype(bool) & (p.r > gate)
-          & np.isfinite(p.h)]
+    q = p[p.case_id.map(use).fillna(False).astype(bool) & _passes(p, gate, s_min)]
     y = q.top_km.values
     ss_tot = float(((y - y.mean()) ** 2).sum()) if len(q) > 1 else 0.0
     r2 = (1 - float(((q.h - q.top_km) ** 2).sum()) / ss_tot
           if ss_tot > 0 else np.nan)
-    out = dict(gate=gate, n_cases=len(ids), n_usable=int(use.reindex(ids).sum()),
+    out = dict(gate=gate, s_min=s_min, n_cases=len(ids), n_usable=int(use.reindex(ids).sum()),
                n_cases_scored=int((s["n"] > 0).sum()),
                **{"yield": float(use.reindex(ids).mean()) if ids else np.nan},
                coverage=float(s["n"].sum() / s["n_use"].sum())
@@ -457,13 +499,13 @@ def summary(run: Run, gate=0.6, qc=(QC_OK,), n_boot=0, seed=0) -> dict:
     return out
 
 
-def gate_ladder(run: Run, gates=(0.5, 0.6, 0.7), qc=(QC_OK,)) -> pd.DataFrame:
+def gate_ladder(run: Run, gates=(0.5, 0.6, 0.7), qc=(QC_OK,), s_min=0.0) -> pd.DataFrame:
     """Quality/coverage trade-off across r gates; reports scored cases per
     gate so a few-case ladder is not mistaken for a population result."""
-    return pd.DataFrame([summary(run, g, qc) for g in gates]).set_index("gate")
+    return pd.DataFrame([summary(run, g, qc, s_min=s_min) for g in gates]).set_index("gate")
 
 
-def case_table(run: Run, gate=0.6, qc=(QC_OK,)) -> pd.DataFrame:
+def case_table(run: Run, gate=0.6, qc=(QC_OK,), s_min=0.0) -> pd.DataFrame:
     """Per-case accuracy, sorted by share of the run's squared corrected
     error (largest first) -- where the error actually comes from.
 
@@ -474,7 +516,7 @@ def case_table(run: Run, gate=0.6, qc=(QC_OK,)) -> pd.DataFrame:
     """
     cs = run.cases[run.cases.qc != QC_ERROR]
     ids = list(cs.case_id)
-    s = _case_sums(run, ids, gate, qc)
+    s = _case_sums(run, ids, gate, qc, s_min)
     W1 = np.ones((1, len(ids)))
     c = _loo_const(W1, s["S1"], s["n"])[0]
     n, S1, S2 = s["n"], s["S1"], s["S2"]
@@ -495,6 +537,108 @@ def case_table(run: Run, gate=0.6, qc=(QC_OK,)) -> pd.DataFrame:
 
 
 # ======================================================================
+# Per-contrail metrics
+# ======================================================================
+def _gap_km(lat, lon):
+    la, lo = np.deg2rad(lat), np.deg2rad(lon)
+    dla, dlo = np.diff(la), np.diff(lo)
+    a = np.sin(dla / 2) ** 2 + np.cos(la[:-1]) * np.cos(la[1:]) * np.sin(dlo / 2) ** 2
+    return 2 * 6371.0 * np.arcsin(np.sqrt(np.clip(a, 0, 1)))
+
+
+def contrail_table(run: Run, gate=0.6, qc=(QC_OK,), gap_km=CONTRAIL_GAP_KM, min_points=3,
+                   agg="median", s_min=0.0) -> pd.DataFrame:
+    """One row per contrail: the unit Meijer et al. (2024) report RMSE in.
+
+    A contrail is a contiguous run of truth points along the lidar track
+    within one case, split wherever consecutive points (in pid order) are
+    more than gap_km apart. Its retrieved height is the `agg` of its points
+    passing the r gate; it is scored if at least min_points pass.
+
+    Columns: case_id, contrail, n_truth, n_gated, top_km (mean truth),
+    h (aggregated stereo), err = h - top_km, scored, plus qc / scene /
+    vza_max where available. Contrails in cases whose qc is not in `qc`
+    are listed with scored=False (they count against contrail coverage).
+    """
+    if run.profiles is None:
+        raise ValueError(f"run {run.name!r} has no truth profiles")
+    cs = run.cases[run.cases.qc != QC_ERROR].set_index("case_id")
+    use = _usable(run, qc)
+    rows = []
+    stored = ("contrail" in run.profiles and run.profiles.contrail.notna().all()
+              and gap_km == CONTRAIL_GAP_KM)
+    for cid, g in run.profiles[run.profiles.case_id.isin(cs.index)].groupby("case_id"):
+        g = g.sort_values("pid")
+        seg = (g.contrail.astype(int).values if stored else
+               np.r_[0, np.cumsum(_gap_km(g.lat.values, g.lon.values) > gap_km)])
+        ok_case = bool(use.get(cid, False))
+        for k, s_ in g.groupby(seg):
+            ok = ok_case & _passes(s_, gate, s_min)
+            hv = s_.h.values[ok]
+            h = (float(np.median(hv)) if agg == "median" else float(np.mean(hv))
+                 ) if ok.sum() >= min_points else np.nan
+            se = s_.s_eff.values if "s_eff" in s_ else np.full(len(s_), np.nan)
+            rows.append(dict(case_id=cid, contrail=f"{cid}#{k}",
+                             n_truth=len(s_), n_gated=int(ok.sum()),
+                             top_km=float(s_.top_km.mean()), h=h,
+                             s_eff=float(np.nanmedian(se)) if np.isfinite(se).any() else np.nan))
+    t = pd.DataFrame(rows)
+    t["err"] = t.h - t.top_km
+    t["scored"] = t.h.notna()
+    extra = [k for k in ("scene", "qc", "vza_max") if k in cs.columns]
+    return t.merge(cs[extra].reset_index(), on="case_id", how="left")
+
+
+def contrail_summary(run: Run, gate=0.6, qc=(QC_OK,), gap_km=CONTRAIL_GAP_KM, min_points=3,
+                     agg="median", n_boot=2000, seed=0, s_min=0.0) -> dict:
+    """Per-contrail accuracy, each contrail weighted equally.
+
+    n_contrails        : contrails in usable cases
+    contrail_coverage  : share of those that are scored
+    bias, rmse_raw     : over scored contrails (the Meijer-comparable pair)
+    rmse_corr          : after removing a leave-one-CASE-out constant (the
+                         mean error of contrails in other cases), so
+                         contrails from the same scene never correct each
+                         other
+    *_ci               : case-bootstrap 95% intervals (contrails in one
+                         case share imagery and weather, so cases are the
+                         independent unit)
+    """
+    t = contrail_table(run, gate, qc, gap_km, min_points, agg, s_min)
+    use = _usable(run, qc)
+    t = t[t.case_id.map(use).fillna(False).astype(bool)]
+    sc = t[t.scored]
+    out = dict(gate=gate, s_min=s_min, n_contrails=len(t), n_scored=len(sc),
+               contrail_coverage=len(sc) / max(len(t), 1),
+               n_cases=int(sc.case_id.nunique()))
+    if len(sc) < 2:
+        return out
+
+    def stats(d):
+        e = d.err.values
+        tot, n = e.sum(), len(e)
+        per = d.groupby("case_id").err.agg(["sum", "count"])
+        c = d.case_id.map((tot - per["sum"]) / (n - per["count"])).values
+        return dict(bias=float(e.mean()), rmse_raw=float(np.sqrt((e**2).mean())),
+                    rmse_corr=float(np.sqrt(np.nanmean((e - c) ** 2))))
+    out.update(stats(sc))
+    if n_boot:
+        rng = np.random.default_rng(seed)
+        cases = sc.case_id.unique()
+        groups = {k: g for k, g in sc.groupby("case_id")}
+        boot = []
+        for _ in range(n_boot):
+            pick = rng.choice(cases, cases.size)
+            d = pd.concat([groups[k].assign(case_id=f"{k}~{i}")
+                           for i, k in enumerate(pick)])
+            boot.append(stats(d))
+        b = pd.DataFrame(boot)
+        for k in ("bias", "rmse_raw", "rmse_corr"):
+            out[f"{k}_ci"] = tuple(np.nanpercentile(b[k], [2.5, 97.5]))
+    return out
+
+
+# ======================================================================
 # Paired comparison
 # ======================================================================
 @dataclass
@@ -509,7 +653,7 @@ class Paired:
     n_error: dict = field(default_factory=dict)
 
 
-def pair(run_a: Run, run_b: Run, gate=0.6, qc=(QC_OK,), ids=None) -> Paired:
+def pair(run_a: Run, run_b: Run, gate=0.6, qc=(QC_OK,), ids=None, s_min=0.0) -> Paired:
     """Align two runs on the cases both completed without error.
 
     own    : each variant's gated points in ITS usable cases -- what you
@@ -517,6 +661,9 @@ def pair(run_a: Run, run_b: Run, gate=0.6, qc=(QC_OK,), ids=None) -> Paired:
     common : points gated in both, in cases usable in both -- pure
              accuracy on identical targets.
     """
+    for r_ in (run_a, run_b):
+        if r_.profiles is not None and "s_eff" not in r_.profiles:
+            r_.profiles = r_.profiles.assign(s_eff=np.nan)
     ca, cb = run_a.cases.set_index("case_id"), run_b.cases.set_index("case_id")
     common = ca.index.intersection(cb.index)
     if ids is not None:
@@ -530,18 +677,20 @@ def pair(run_a: Run, run_b: Run, gate=0.6, qc=(QC_OK,), ids=None) -> Paired:
 
     A = {}
     for tag, r in (("A", run_a), ("B", run_b)):
-        s = _case_sums(r, common, gate, qc)
+        s = _case_sums(r, common, gate, qc, s_min)
         A["n_all"] = s["n_all"]
         A[f"nuse{tag}"] = s["n_use"]
         A[f"n{tag}"], A[f"S1{tag}"], A[f"S2{tag}"] = s["n"], s["S1"], s["S2"]
 
     ua, ub = _usable(run_a, qc), _usable(run_b, qc)
-    j = run_a.profiles.merge(run_b.profiles[["case_id", "pid", "h", "r"]],
+    j = run_a.profiles.merge(run_b.profiles[["case_id", "pid", "h", "r", "s_eff"]],
                              on=["case_id", "pid"], suffixes=("_a", "_b"))
     j = j[j.case_id.isin(common)]
     ea, eb = (j.h_a - j.top_km).values, (j.h_b - j.top_km).values
+    sa_ok = (j.s_eff_a.values >= s_min) if s_min else np.ones(len(j), bool)
+    sb_ok = (j.s_eff_b.values >= s_min) if s_min else np.ones(len(j), bool)
     both = (np.isfinite(ea) & np.isfinite(eb) & (j.r_a.values > gate)
-            & (j.r_b.values > gate)
+            & (j.r_b.values > gate) & sa_ok & sb_ok
             & j.case_id.map(ua).fillna(False).values.astype(bool)
             & j.case_id.map(ub).fillna(False).values.astype(bool))
     d = pd.DataFrame(dict(case_id=j.case_id, n=both.astype(float),

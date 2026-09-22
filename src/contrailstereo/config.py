@@ -106,6 +106,7 @@ class StereoConfig:
     # ----- per-pixel quality mask -----
     r_min:      float = 0.35            # peak local correlation floor
     amp_min_k:  float = 0.25            # reference-view feature amplitude [K]
+    obs_min_s_eff: float = 0.0
 
     # ----- scene QC -----
     no_data_s:           float = 120.0      # if time offset is beyond this, no_data (#TODO change this to be lenient in tracking mode)

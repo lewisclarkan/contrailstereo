@@ -81,6 +81,8 @@ def _add_common(p):
     p.add_argument("--max-vza", type=float, default=None,
                    help="keep cases seen by both satellites at VZA <= this [deg]")
     p.add_argument("--gate", type=float, default=0.6, help="r gate for metrics")
+    p.add_argument("--s-min", type=float, default=0.0,
+                   help="s_eff gate for metrics [km/km] (e.g. 1.0)")
     p.add_argument("--qc", default=QC_OK,
                    help="verdicts that count, comma-separated, or 'all'")
     p.add_argument("--out", default=None, help="run directory "
@@ -144,17 +146,24 @@ def cmd_run(args):
     print(r.cases.qc.value_counts().to_string())
     if r.profiles is not None and len(r.profiles):
         qc = _qc(args.qc)
-        s = V.summary(r, args.gate, qc, n_boot=1000)
-        print(f"\nr > {args.gate}, qc {args.qc}: n={int(s['n'])} "
+        s = V.summary(r, args.gate, qc, n_boot=1000, s_min=args.s_min)
+        print(f"\nr > {args.gate}, s_eff >= {args.s_min}, qc {args.qc}: n={int(s['n'])} "
               f"({s['n_cases_scored']} cases)  coverage {s['coverage']:.3f}  "
               f"bias {s['bias']:+.3f}  rmse_raw {s['rmse_raw']:.3f}  "
               f"rmse_corr {s['rmse_corr']:.3f} "
               f"[{s['rmse_corr_ci'][0]:.3f}, {s['rmse_corr_ci'][1]:.3f}]  "
               f"within {s['within']:.3f}  between {s['between']:.3f}")
         print()
-        _print(V.gate_ladder(r, (0.5, 0.6, 0.7), qc)[
+        _print(V.gate_ladder(r, (0.5, 0.6, 0.7), qc, s_min=args.s_min)[
             ["n", "n_cases_scored", "coverage", "bias", "rmse_corr",
              "within", "between"]])
+        c = V.contrail_summary(r, args.gate, qc, n_boot=1000, s_min=args.s_min)
+        if "rmse_corr" in c:
+            ci = lambda k: f"[{c[k + '_ci'][0]:.3f}, {c[k + '_ci'][1]:.3f}]"
+            print(f"\nper contrail: {c['n_scored']}/{c['n_contrails']} scored "
+                  f"(coverage {c['contrail_coverage']:.2f})  bias {c['bias']:+.3f} {ci('bias')}  "
+                  f"rmse_raw {c['rmse_raw']:.3f} {ci('rmse_raw')}  "
+                  f"rmse_corr {c['rmse_corr']:.3f} {ci('rmse_corr')}")
     return 0
 
 
@@ -177,7 +186,8 @@ def cmd_compare(args):
     runs = V.run(cases, [va, vb], out, paths=paths, index=args.index,
                  frame_loader=FRAME_LOADER, verbose=not args.quiet)
     ids = [c.id for c in cases]
-    P = V.pair(runs[va.name], runs[vb.name], args.gate, _qc(args.qc), ids=ids)
+    P = V.pair(runs[va.name], runs[vb.name], args.gate, _qc(args.qc), ids=ids,
+               s_min=args.s_min)
     S = V.compare(P, n_boot=args.n_boot)
     a = S.attrs
     print(f"\n{a['n_cases']} common cases, {a['n_common_points']} common "

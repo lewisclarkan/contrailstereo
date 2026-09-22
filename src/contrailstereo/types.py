@@ -179,6 +179,7 @@ class Result:
     height  : height map [km]; NaN where masked.
     r       : peak local correlation at each pixel.
     amp     : local feature amplitude of the reference view [K].
+    s_eff   :
     diag    : scalar diagnostics."""
 
     case_id: str
@@ -188,6 +189,7 @@ class Result:
     height: Optional[np.ndarray] = None
     r: Optional[np.ndarray] = None
     amp: Optional[np.ndarray] = None
+    s_eff: Optional[np.ndarray] = None
     diag: dict = field(default_factory=dict)
     config_hash: str = ""
 

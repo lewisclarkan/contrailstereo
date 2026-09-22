@@ -86,7 +86,7 @@ def map_panel(result: Result, truth: pd.DataFrame | None = None, btd=None,
         t = truth.sort_values("lat")
         ax.plot(t.lat, t.top_km, "k.", ms=3, label="truth top")
         if "h" in t:
-            ax.plot(t.lat, t.h, "-", color="C0", lw=1.5, label="stereo")
+            ax.plot(t.lat, t.h, ".", color="C0", ms=4, label="stereo")
         ax.set_xlabel("lat [deg]")
         ax.set_ylabel("height [km]")
         ax.set_ylim(*h_lims)

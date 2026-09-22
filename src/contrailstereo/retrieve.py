@@ -221,6 +221,20 @@ def scene_qc(offset_s, valid_frac, H, wind, cfg: StereoConfig = DEFAULT):
         return QC_OFFSET, diag
     return QC_OK, diag
 
+def case_observability(frames, grid, H, cfg: StereoConfig = DEFAULT):
+    """s_eff map for the case: structure-tensor observability of the
+    reference view's BTD, parallax-corrected to the median retrieved height
+    (11 km if there is none). Returns (s_eff map, diag)."""
+    E, W = cfg.sat_east, cfg.sat_west
+    h_ref = float(np.nanmedian(H)) if np.isfinite(H).any() else 11.0
+    fE = frames[(E, 0)]
+    alat, alon = apparent_surface_latlon(grid.lat, grid.lon, h_ref * 1e3, fE.sat_lon)
+    o = observability(fE.view(alat, alon), grid, (E, W), cfg)
+    on = np.isfinite(H) & np.isfinite(o["s_eff"])
+    return o["s_eff"], dict(k_km_per_km=o["k_km_per_km"], axis_deg=o["axis_deg"],
+                            s_eff_median=float(np.median(o["s_eff"][on])) if on.any() else np.nan,
+                            s_eff_h_ref=h_ref)
+
 
 # ---------- Combined ----------- 
 
@@ -267,6 +281,9 @@ def retrieve(case: Case, cfg: StereoConfig = DEFAULT, paths: Paths | None = None
     preps, pinfo = make_preps(grid, (E, W), cfg)
     m = MATCHERS[cfg.mode](frames, grid, cfg, preps, wind)
     H, rmax = height_map(m["hs"], m["R"], m["amp"], cfg)
+    s_eff, odiag = case_observability(frames, grid, H, cfg)
+    if cfg.obs_min_s_eff > 0:
+        H = np.where(s_eff >= cfg.obs_min_s_eff, H, np.nan)
     qc, qdiag = scene_qc(offset, m["valid_frac"], H, wind, cfg)
     diag.update(qdiag)
     diag.update(pinfo)
@@ -318,4 +335,9 @@ def sample_at(result: Result, lat, lon, patch=5, index="nearest"):
  
     h = [med(result.height, i, j) if o else np.nan for i, j, o in zip(ii, jj, ok)]
     r = [med(result.r, i, j) if o else np.nan for i, j, o in zip(ii, jj, ok)]
-    return pd.DataFrame(dict(h=h, r=r), index=idx)
+
+    if result.s_eff is not None:
+        se = [float(result.s_eff[i, j]) if o else np.nan for i, j, o in zip(ii, jj, ok)]
+    else:
+        se = [np.nan] * n
+    return pd.DataFrame(dict(h=h, r=r, s_eff=se), index=idx)

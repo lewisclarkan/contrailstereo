@@ -175,6 +175,62 @@ def fft_filter(f, F, pad) -> np.ndarray:
         out = num / np.where(np.abs(den) > 1e-3, den, np.nan)
     out[~m] = np.nan
     return out[pad[0]:out.shape[0] - pad[0], pad[1]:out.shape[1] - pad[1]]
+
+# How much height information
+
+
+def observability(field, grid: Grid, sats, cfg: StereoConfig = DEFAULT,
+                  deriv_sigma_px=1.5) -> dict:
+    """How much height information the local structure carries for a pair.
+ 
+    Stereo measures height only through displacement along the disparity
+    axis k (km of separation per km of height). A linear feature -- a
+    contrail -- parallel to k looks the same after that displacement, so
+    its correlation-vs-height curve is flat: high r, no height information.
+    Only the component of k across the feature counts.
+ 
+    Local orientation and linearity come from the structure tensor of the
+    high-passed field, averaged over ~the matching window:
+        coherence : 0 isotropic texture ... 1 perfectly linear
+        angle_deg : angle between the local feature and the disparity axis
+        s_eff     : effective sensitivity [km of cross-feature shift per km
+                    of height] = |k| sqrt(coh cos^2(phi - psi) + (1 - coh)/2),
+                    phi = gradient direction, psi = axis direction.
+                    |k| for a feature perpendicular to the axis, 0 parallel,
+                    |k|/sqrt 2 for isotropic texture.
+ 
+    field : 2-D field on grid (e.g. the reference view's BTD).
+    sats  : (sat_a, sat_b) defining the disparity axis.
+    Returns dict of 2-D arrays (NaN where field is NaN) plus k_km_per_km
+    and axis_deg (bearing, clockwise from north).
+    """
+    from .geometry import disparity_per_km
+    if grid.kind != "latlon":
+        raise NotImplementedError("observability assumes north/east grid axes")
+    sig_px, win_px = km_filters(grid, cfg)
+    f = highpass(field, sig_px)
+    m = np.isfinite(f)
+    f0 = np.where(m, f, 0.0)
+    gn = gaussian_filter(f0, deriv_sigma_px, order=(1, 0)) / grid.px_km[0]
+    ge = gaussian_filter(f0, deriv_sigma_px, order=(0, 1)) / grid.px_km[1]
+    s = (win_px[0] / 4.0, win_px[1] / 4.0)
+    Jee, Jnn, Jen = (gaussian_filter(a, s) for a in (ge * ge, gn * gn, ge * gn))
+    tr = Jee + Jnn
+    with np.errstate(invalid="ignore", divide="ignore"):
+        coh = np.sqrt((Jee - Jnn) ** 2 + 4 * Jen ** 2) / tr
+    phi = 0.5 * np.arctan2(2 * Jen, Jee - Jnn)          # gradient, from east
+    lat0, lon0 = grid.bbox.center
+    kn, ke = disparity_per_km(lat0, lon0, *sats)
+    k, psi = float(np.hypot(kn, ke)), float(np.arctan2(kn, ke))
+    c2 = np.cos(phi - psi) ** 2
+    s_eff = k * np.sqrt(np.clip(coh * c2 + (1 - coh) * 0.5, 0, None))
+    # sin(feature-axis angle) = |cos(gradient-axis angle)|
+    ang = np.degrees(np.arcsin(np.clip(np.sqrt(c2), 0, 1)))
+    out = dict(s_eff=s_eff, coherence=coh, angle_deg=ang)
+    for key in out:
+        out[key] = np.where(m, out[key], np.nan)
+    out.update(k_km_per_km=k, axis_deg=float(np.degrees(np.arctan2(ke, kn)) % 180))
+    return out
  
  
 # ---------- Entrypoint ----------
