@@ -63,7 +63,9 @@ def map_panel(result: Result, truth: pd.DataFrame | None = None, btd=None,
               else []) + [
         ("height [km]", result.height,
          dict(cmap="viridis", vmin=h_lims[0], vmax=h_lims[1])),
-        ("peak r", result.r, dict(cmap="magma", vmin=0, vmax=1))]
+        ("peak r", result.r, dict(cmap="magma", vmin=0, vmax=1))] + (
+        [("s_eff [km/km]", result.s_eff, dict(cmap="cividis", vmin=0, vmax=2.5))]
+        if result.s_eff is not None else [])
     nrow = 2 if truth is not None else 1
     fig = plt.figure(figsize=(4.4 * len(panels), 4.6 + 2.6 * (nrow - 1)))
     gs = fig.add_gridspec(nrow, len(panels),
@@ -106,15 +108,15 @@ def map_panel(result: Result, truth: pd.DataFrame | None = None, btd=None,
 # Run
 # ======================================================================
 def truth_scatter(run: V.Run, gate=0.6, qc=(QC_OK,), lims=(7.0, 16.0),
-                  bias_correct=True, ax=None, save=None):
+                  bias_correct=True, ax=None, save=None, s_min=0.0):
     """Retrieved vs truth height, 2-D histogram with 1:1 line and stats.
     bias_correct subtracts each case's leave-one-case-out constant (what
     rmse_corr measures); the stats box always shows both."""
-    s = V.summary(run, gate, qc)
+    s = V.summary(run, gate, qc, s_min=s_min)
     p = run.profiles
     use = V._usable(run, qc)
-    q = p[p.case_id.map(use).fillna(False).astype(bool) & (p.r > gate)
-          & np.isfinite(p.h)].copy()
+    q = p[p.case_id.map(use).fillna(False).astype(bool)
+          & V._passes(p, gate, s_min)].copy()
     q["e"] = q.h - q.top_km
     if bias_correct and len(q):
         means = q.groupby("case_id").e.mean()
@@ -142,14 +144,15 @@ def truth_scatter(run: V.Run, gate=0.6, qc=(QC_OK,), lims=(7.0, 16.0),
             f"within {s['within']:.2f}, between {s['between']:.2f} km",
             transform=ax.transAxes, va="top", fontsize=8,
             bbox=dict(fc="w", ec="0.7", alpha=0.9))
-    ax.set_title(f"{run.name}   r > {gate}", fontsize=10)
+    ax.set_title(f"{run.name}   r > {gate}" + (f", s_eff ≥ {s_min}" if s_min else ""),
+                 fontsize=10)
     return _finish(fig, save)
 
 
 def gate_tradeoff(run: V.Run, gates=np.arange(0.3, 0.86, 0.05), qc=(QC_OK,),
-                  save=None):
+                  save=None, s_min=0.0):
     """Corrected RMSE (with within/between) and coverage against the r gate."""
-    lad = V.gate_ladder(run, tuple(np.round(gates, 3)), qc)
+    lad = V.gate_ladder(run, tuple(np.round(gates, 3)), qc, s_min=s_min)
     fig, ax = plt.subplots(figsize=(6.4, 4.0))
     ax.plot(lad.index, lad.rmse_corr, "o-", color="k", label="rmse_corr")
     ax.plot(lad.index, lad.within, "--", color="C0", label="within")
@@ -164,7 +167,7 @@ def gate_tradeoff(run: V.Run, gates=np.arange(0.3, 0.86, 0.05), qc=(QC_OK,),
     h1, l1 = ax.get_legend_handles_labels()
     h2, l2 = ax2.get_legend_handles_labels()
     ax.legend(h1 + h2, l1 + l2, fontsize=8, loc="lower left")
-    ax.set_title(run.name, fontsize=10)
+    ax.set_title(run.name + (f"   s_eff ≥ {s_min}" if s_min else ""), fontsize=10)
     fig.tight_layout()
     return _finish(fig, save)
 

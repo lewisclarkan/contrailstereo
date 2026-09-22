@@ -1,15 +1,22 @@
-""" retrieval 
+"""The retrieval: one Case in, one Result out.
 
-retrieve(case, cfg)
+    retrieve(case, cfg)
+      ├─ make_grid(case.bbox)                      geometry
+      ├─ load_frames(case)      -> {(sat, k): Frame}   data + prep.btd_view
+      ├─ load_winds(case)       -> WindProfile | None  data.era5
+      ├─ make_preps(grid)       -> per-view conditioning
+      ├─ match_<mode>(...)      -> correlation cube over heights
+      ├─ height_map(...)        -> refined, masked height map
+      └─ scene_qc(...)          -> verdict + diagnostics
 
-1) make_grid(case.bbox)
-2) load_frames(case)        -> {(sat, k): Frame}
-3) load_winds(case)         -> WindProfile
-4) make_preps(grid)         -> per-view conditioning
-5) match_<mode>(...)        -> correlation cube over heights
-6) height_map(...)          -> refined, masked height map
-7) scene_qc(...)            -> verdict and diagnostics
+Nothing here knows about CALIOP. Validation samples the returned map at
+truth points with ``sample_at``; the same function serves flight tracks.
 
+Frames and projection are mode-agnostic: a frame is one satellite at one
+time, and ``project`` advects the grid by wind x (frame time - reference
+time) before parallax projection. Snapshot mode uses the East and West
+frames at the case time; track mode will use the same machinery with frames
+at several times (``match_track`` is the only missing piece).
 """
 
 from __future__ import annotations
@@ -17,42 +24,47 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 from scipy.ndimage import uniform_filter
- 
+
 from .config import DEFAULT, SAT_LON, Paths, StereoConfig, load_paths
 from .data import era5, goes
 from .geometry import (apparent_surface_latlon, km_filters, locate, make_grid,
                        vza_deg)
-from .prep import btd_view, make_preps
+from .prep import btd_view, make_preps, observability
 from .types import (QC_COVERAGE, QC_NO_DATA, QC_OFFSET, QC_OK, Case, Frame,
                     Grid, Result, WindProfile)
- 
+
 M_PER_DEG = 111.0e3          # advection shift, as pre-restructure
 QC_REF_H_KM = 10.0           # height at which valid overlap is judged
 _FETCH = "fetch"
 
 
-# ---------- Inputs ----------
-
+# ======================================================================
+# Inputs
+# ======================================================================
 def frame_offsets_min(cfg: StereoConfig) -> tuple:
     """Frame times relative to the case time [min], by mode."""
     return (0.0,) if cfg.mode == "snapshot" else tuple(cfg.track.dts_min)
- 
- 
+
+
 def ref_key(cfg: StereoConfig):
     """Key of the reference frame: East at the case time."""
     return (cfg.sat_east, frame_offsets_min(cfg).index(0.0))
- 
- 
+
+
 def frames_signature(cfg: StereoConfig) -> tuple:
     """Every config field load_frames reads. Variants with equal
     signatures can share one set of loaded frames."""
     return (cfg.sat_east, cfg.sat_west, cfg.channels, frame_offsets_min(cfg),
             cfg.stripe_nsig, cfg.stripe_dilate, cfg.stripe_mask)
- 
- 
+
+
 def load_frames(case: Case, cfg: StereoConfig = DEFAULT,
                 paths: Paths | None = None) -> dict:
-    """{(sat, k): Frame} for East and West at each frame offset."""
+    """{(sat, k): Frame} for East and West at each frame offset.
+
+    The West view is destriped (rows flagged on its full-sector BTD, masked
+    in both channels when cfg.stripe_mask); diagnostics go in Frame.stripe.
+    """
     paths = paths or load_paths()
     a, b = cfg.channels
     frames = {}
@@ -73,8 +85,8 @@ def load_frames(case: Case, cfg: StereoConfig = DEFAULT,
                                      view=btd_view(da, db), domain=dom,
                                      stripe=stripe)
     return frames
- 
- 
+
+
 def load_winds(case: Case, cfg: StereoConfig = DEFAULT,
                paths: Paths | None = None):
     """ERA5 profile at the case anchor, or None if disabled/unavailable."""
@@ -86,12 +98,17 @@ def load_winds(case: Case, cfg: StereoConfig = DEFAULT,
                             paths.era5_cache)
 
 
-# ---------- Matching ----------
-
-
+# ======================================================================
+# Matching
+# ======================================================================
 def project(frame: Frame, ref_time, h_km, grid: Grid, prep,
             wind: WindProfile | None = None) -> np.ndarray:
-    """The frame's conditioned field on the grid, for a cloud at h_km."""
+    """The frame's conditioned field on the grid, for a cloud at h_km.
+
+    The grid is advected by wind(h) x (frame.time - ref_time) BEFORE the
+    parallax projection -- it is the cloud that moves, not its ground
+    projection, and the order matters at oblique angles.
+    """
     dt = (frame.time - pd.Timestamp(ref_time)).total_seconds()
     glat, glon = grid.lat, grid.lon
     if wind is not None and dt != 0.0:
@@ -101,11 +118,11 @@ def project(frame: Frame, ref_time, h_km, grid: Grid, prep,
     alat, alon = apparent_surface_latlon(glat, glon, h_km * 1000.0,
                                          frame.sat_lon)
     return prep(frame.view(alat, alon))
- 
- 
+
+
 def local_corr(A, B, win_px):
     """Moving-window Pearson r at every pixel, NaN-aware via weights.
- 
+
     Returns (r, amp): amp is A's local standard deviation. Windows with
     less than 70% valid support are NaN.
     """
@@ -120,15 +137,15 @@ def local_corr(A, B, win_px):
         r = cAB / np.sqrt(vA * vB)
     r[uniform_filter(wgt, win_px) < 0.7] = np.nan
     return r, np.sqrt(np.maximum(vA, 0))
- 
- 
+
+
 def height_scan(cfg: StereoConfig) -> np.ndarray:
     return np.arange(cfg.h_lo_km, cfg.h_hi_km + 1e-9, cfg.dh_km)
- 
- 
+
+
 def match_snapshot(frames, grid, cfg, preps, wind):
     """Correlation cube over heights from the East/West pair.
- 
+
     Returns dict:
         hs         : scanned heights [km]
         R          : (n_h, *grid.shape) local correlation
@@ -153,20 +170,20 @@ def match_snapshot(frames, grid, cfg, preps, wind):
         if k == k_ref:
             valid = float((np.isfinite(A) & np.isfinite(B)).mean())
     return dict(hs=hs, R=R, amp=amp, valid_frac=valid)
- 
- 
+
+
 def match_track(frames, grid, cfg, preps, wind):
     """Multi-frame matching with a fitted wind (planned). Same inputs and
     outputs as match_snapshot, plus fitted (u, v) in the returned dict."""
     raise NotImplementedError("tracking mode is not implemented yet")
- 
- 
+
+
 MATCHERS = {"snapshot": match_snapshot, "track": match_track}
- 
- 
+
+
 def height_map(hs, R, amp, cfg: StereoConfig = DEFAULT):
     """Per-pixel height from the correlation cube.
- 
+
     Argmax over heights, three-point parabolic sub-step refinement (clipped
     to +-1 step), then masked where r <= cfg.r_min, amplitude <=
     cfg.amp_min_k, or the peak sits on either end of the scan.
@@ -186,12 +203,12 @@ def height_map(hs, R, amp, cfg: StereoConfig = DEFAULT):
     return H, rmax
 
 
-# ---------- QC ---------- 
-
-
+# ======================================================================
+# QC
+# ======================================================================
 def scene_qc(offset_s, valid_frac, H, wind, cfg: StereoConfig = DEFAULT):
     """Truth-free scene verdict (no_data is decided before matching).
- 
+
     coverage : valid East/West overlap on the grid below cfg.min_valid_frac
     offset   : with a wind correction, the residual displacement from wind
                uncertainty (base + frac x speed at the median map height)
@@ -221,6 +238,7 @@ def scene_qc(offset_s, valid_frac, H, wind, cfg: StereoConfig = DEFAULT):
         return QC_OFFSET, diag
     return QC_OK, diag
 
+
 def case_observability(frames, grid, H, cfg: StereoConfig = DEFAULT):
     """s_eff map for the case: structure-tensor observability of the
     reference view's BTD, parallax-corrected to the median retrieved height
@@ -236,17 +254,18 @@ def case_observability(frames, grid, H, cfg: StereoConfig = DEFAULT):
                             s_eff_h_ref=h_ref)
 
 
-# ---------- Combined ----------- 
-
+# ======================================================================
+# Orchestration
+# ======================================================================
 def retrieve(case: Case, cfg: StereoConfig = DEFAULT, paths: Paths | None = None,
              frames: dict | None = None, wind=_FETCH) -> Result:
     """Run the retrieval for one case.
- 
+
     frames : pre-loaded frames (from load_frames with an equal
              frames_signature) -- lets variants share one load.
     wind   : "fetch" (ERA5 when the East/West offset needs it), None (no
              correction), or a WindProfile to use as given.
- 
+
     Returns a Result. Maps are returned for every verdict except no_data;
     deciding which verdicts count is the caller's job.
     """
@@ -254,7 +273,7 @@ def retrieve(case: Case, cfg: StereoConfig = DEFAULT, paths: Paths | None = None
         raise ValueError(f"unknown mode {cfg.mode!r}")
     if cfg.mode == "track":
         match_track(None, None, cfg, None, None)       # fail before loading
- 
+
     grid = make_grid(case.bbox, cfg)
     frames = frames if frames is not None else load_frames(case, cfg, paths)
     E, W = cfg.sat_east, cfg.sat_west
@@ -269,15 +288,15 @@ def retrieve(case: Case, cfg: StereoConfig = DEFAULT, paths: Paths | None = None
                 stripe_rows=fW.stripe.get("n_rows", 0),
                 grid_ny=grid.shape[0], grid_nx=grid.shape[1])
     diag["vza_max"] = max(diag["vza_east"], diag["vza_west"])
- 
+
     if abs(offset) > cfg.no_data_s:
         return Result(case.id, cfg.mode, QC_NO_DATA, grid, diag=diag,
                       config_hash=cfg.config_hash())
- 
+
     if isinstance(wind, str) and wind == _FETCH:
         wind = (load_winds(case, cfg, paths)
                 if abs(offset) >= cfg.wind_min_offset_s else None)
- 
+
     preps, pinfo = make_preps(grid, (E, W), cfg)
     m = MATCHERS[cfg.mode](frames, grid, cfg, preps, wind)
     H, rmax = height_map(m["hs"], m["R"], m["amp"], cfg)
@@ -287,34 +306,37 @@ def retrieve(case: Case, cfg: StereoConfig = DEFAULT, paths: Paths | None = None
     qc, qdiag = scene_qc(offset, m["valid_frac"], H, wind, cfg)
     diag.update(qdiag)
     diag.update(pinfo)
+    diag.update(odiag)
     diag.update(valid_frac=m["valid_frac"],
                 map_coverage=float(np.isfinite(H).mean()))
     return Result(case.id, cfg.mode, qc, grid, height=H, r=rmax,
-                  amp=m["amp"], diag=diag, config_hash=cfg.config_hash())
+                  amp=m["amp"], s_eff=s_eff, diag=diag,
+                  config_hash=cfg.config_hash())
 
 
-# ---------- Sampling the results -----------
-
-
+# ======================================================================
+# Sampling the result
+# ======================================================================
 def sample_at(result: Result, lat, lon, patch=5, index="nearest"):
     """Patch-median height and correlation at arbitrary points.
- 
+
     patch : odd patch size in pixels.
     index : "nearest" -- patch centred on the nearest pixel; points off the
                          grid get NaN; patches truncate at the grid edge.
             "legacy"  -- the pre-restructure rule (first grid line at or
                          above the point, clipped to stay patch/2 from the
                          edge). Only for reproducing v4 results exactly.
- 
-    Returns DataFrame(h, r), indexed like `lat` if it is a Series.
+
+    Returns DataFrame(h, r, s_eff), indexed like `lat` if it is a Series
+    (s_eff is NaN if the result has none).
     """
     idx = lat.index if isinstance(lat, pd.Series) else None
     lat, lon = np.atleast_1d(np.asarray(lat, float)), np.atleast_1d(
         np.asarray(lon, float))
     n = lat.size
     if result.height is None:
-        return pd.DataFrame(dict(h=np.full(n, np.nan), r=np.full(n, np.nan)),
-                            index=idx)
+        return pd.DataFrame(dict(h=np.full(n, np.nan), r=np.full(n, np.nan),
+                                 s_eff=np.full(n, np.nan)), index=idx)
     g, half = result.grid, patch // 2
     ny, nx = g.shape
     if index == "legacy":
@@ -328,15 +350,14 @@ def sample_at(result: Result, lat, lon, patch=5, index="nearest"):
         jj = np.rint(np.nan_to_num(fj)).astype(int)
     else:
         raise ValueError(f"unknown index rule {index!r}")
- 
+
     def med(Z, i, j):
         p = Z[max(i - half, 0):i + half + 1, max(j - half, 0):j + half + 1]
         return float(np.nanmedian(p)) if np.isfinite(p).any() else np.nan
- 
+
     h = [med(result.height, i, j) if o else np.nan for i, j, o in zip(ii, jj, ok)]
     r = [med(result.r, i, j) if o else np.nan for i, j, o in zip(ii, jj, ok)]
-
-    if result.s_eff is not None:
+    if result.s_eff is not None:        # nearest pixel, as the observability analysis
         se = [float(result.s_eff[i, j]) if o else np.nan for i, j, o in zip(ii, jj, ok)]
     else:
         se = [np.nan] * n

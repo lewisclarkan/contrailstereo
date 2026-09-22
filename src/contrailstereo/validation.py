@@ -369,14 +369,24 @@ def _usable(run: Run, qc) -> pd.Series:
 
 
 def _passes(p, gate, s_min=0.0):
-    """Truth points passing the r gate and (if s_min > 0) the s_eff gate."""
+    """Truth points passing the r gate and (if s_min > 0) the s_eff gate.
+    Points with no s_eff (no-data scenes, off-grid points) fail the s_eff
+    gate, just as points with no height fail the r gate."""
     ok = np.isfinite(p.h.values) & (p.r.values > gate)
     if s_min and s_min > 0:
-        if "s_eff" not in p or p.s_eff.isna().all():
-            raise ValueError("s_min > 0 needs s_eff in the profiles "
-                             "(runs made before s_eff was stored)")
-        ok &= p.s_eff.values >= s_min
+        if "s_eff" not in p:
+            raise ValueError("s_min > 0 needs an s_eff column in the profiles")
+        with np.errstate(invalid="ignore"):
+            ok &= np.nan_to_num(p.s_eff.values, nan=-np.inf) >= s_min
     return ok
+
+
+def _require_s_eff(run: Run, s_min):
+    """Run-level check: gating on s_eff needs a run that stored it."""
+    if s_min and s_min > 0 and (run.profiles is None or "s_eff" not in run.profiles
+                                or run.profiles.s_eff.isna().all()):
+        raise ValueError(f"run {run.name!r} has no stored s_eff (made before s_eff "
+                         "was stored?); rerun it to gate on s_eff")
 
 
 def _case_sums(run: Run, ids, gate, qc, s_min=0.0):
@@ -387,6 +397,7 @@ def _case_sums(run: Run, ids, gate, qc, s_min=0.0):
                     points passing the gate in usable cases."""
     if run.profiles is None:
         raise ValueError(f"run {run.name!r} has no truth profiles")
+    _require_s_eff(run, s_min)
     use = _usable(run, qc)
     p = run.profiles
     e = (p.h - p.top_km).values
@@ -562,6 +573,7 @@ def contrail_table(run: Run, gate=0.6, qc=(QC_OK,), gap_km=CONTRAIL_GAP_KM, min_
     """
     if run.profiles is None:
         raise ValueError(f"run {run.name!r} has no truth profiles")
+    _require_s_eff(run, s_min)
     cs = run.cases[run.cases.qc != QC_ERROR].set_index("case_id")
     use = _usable(run, qc)
     rows = []
@@ -687,8 +699,10 @@ def pair(run_a: Run, run_b: Run, gate=0.6, qc=(QC_OK,), ids=None, s_min=0.0) -> 
                              on=["case_id", "pid"], suffixes=("_a", "_b"))
     j = j[j.case_id.isin(common)]
     ea, eb = (j.h_a - j.top_km).values, (j.h_b - j.top_km).values
-    sa_ok = (j.s_eff_a.values >= s_min) if s_min else np.ones(len(j), bool)
-    sb_ok = (j.s_eff_b.values >= s_min) if s_min else np.ones(len(j), bool)
+    _require_s_eff(run_a, s_min); _require_s_eff(run_b, s_min)
+    with np.errstate(invalid="ignore"):
+        sa_ok = (np.nan_to_num(j.s_eff_a.values, nan=-np.inf) >= s_min) if s_min else np.ones(len(j), bool)
+        sb_ok = (np.nan_to_num(j.s_eff_b.values, nan=-np.inf) >= s_min) if s_min else np.ones(len(j), bool)
     both = (np.isfinite(ea) & np.isfinite(eb) & (j.r_a.values > gate)
             & (j.r_b.values > gate) & sa_ok & sb_ok
             & j.case_id.map(ua).fillna(False).values.astype(bool)
