@@ -46,23 +46,59 @@ def _geo_axes(ax, grid):
 # ======================================================================
 # Case
 # ======================================================================
+FT_KM = 0.3048
+
+
+def height_norm(h_lims, h_step=0.2, fl_bins=False, cmap="turbo"):
+    """Discrete colour scale for heights: one colour per h_step km (or per
+    flight level, 1000 ft, when fl_bins). Returns (cmap, norm, edges, ticks,
+    tick labels)."""
+    from matplotlib.colors import BoundaryNorm
+    lo, hi = h_lims
+    if fl_bins:
+        fl0, fl1 = int(np.floor(lo / FT_KM)), int(np.ceil(hi / FT_KM))
+        edges = (np.arange(fl0, fl1 + 1) - 0.5) * FT_KM        # bins centred on FLs
+        centres = np.arange(fl0, fl1) * FT_KM
+        step = max(1, int(round(len(centres) / 8)))
+        ticks = centres[::step]
+        labels = [f"FL{int(round(c / FT_KM * 10))}" for c in ticks]   # km -> hundreds of ft
+    else:
+        edges = np.arange(lo, hi + h_step / 2, h_step)
+        step = max(1, int(round(len(edges) / 9)))
+        ticks = edges[::step]
+        labels = [f"{t:.1f}" for t in ticks]
+    cm = plt.get_cmap(cmap, len(edges) + 1)          # + below/above-range bins
+    return cm, BoundaryNorm(edges, cm.N, extend="both"), edges, ticks, labels
+
+
 def map_panel(result: Result, truth: pd.DataFrame | None = None, btd=None,
-              h_lims=(9.0, 14.0), title=None, save=None):
+              h_lims=(8.0, 14.0), title=None, save=None, h_step=0.2,
+              fl_bins=False, h_cmap="turbo"):
     """Height map, peak correlation (and optional BTD) for one case, with
     the along-track comparison below when truth is given.
 
-    truth : attach_truth output (lat, lon, top_km, h, r) or any frame with
-            lat, lon, top_km.
-    btd   : optional 2-D field on result.grid (e.g. the parallax-corrected
-            reference-view BTD) for context.
+    truth   : attach_truth output (lat, lon, top_km, h, r) or any frame with
+              lat, lon, top_km.
+    btd     : optional 2-D field on result.grid (e.g. the parallax-corrected
+              reference-view BTD) for context.
+    h_step  : height colour bands [km] (default 200 m); None = continuous.
+    fl_bins : one band per flight level (1000 ft), labelled FLxxx.
     """
     if result.height is None:
         raise ValueError(f"case {result.case_id}: no maps (qc={result.qc})")
     g = result.grid
+    if h_step is None and not fl_bins:
+        hkw, hcb = dict(cmap="viridis", vmin=h_lims[0], vmax=h_lims[1]), {}
+        hlabel = "height [km]"
+    else:
+        cm, norm, edges, ticks, labels = height_norm(h_lims, h_step or FT_KM, fl_bins, h_cmap)
+        hkw = dict(cmap=cm, norm=norm)
+        hcb = dict(ticks=ticks, labels=labels)
+        hlabel = ("height (1 band = 1 flight level)" if fl_bins
+                  else f"height [km] ({(h_step or FT_KM) * 1e3:.0f} m bands)")
     panels = ([("BTD [K]", btd, dict(cmap="RdBu_r"))] if btd is not None
               else []) + [
-        ("height [km]", result.height,
-         dict(cmap="viridis", vmin=h_lims[0], vmax=h_lims[1])),
+        (hlabel, result.height, hkw),
         ("peak r", result.r, dict(cmap="magma", vmin=0, vmax=1))] + (
         [("s_eff [km/km]", result.s_eff, dict(cmap="cividis", vmin=0, vmax=2.5))]
         if result.s_eff is not None else [])
@@ -76,7 +112,9 @@ def map_panel(result: Result, truth: pd.DataFrame | None = None, btd=None,
             v = np.nanpercentile(np.abs(Z), 99)
             kw = dict(kw, vmin=-v, vmax=v)
         m = _mesh(ax, g, Z, **kw)
-        fig.colorbar(m, ax=ax, shrink=0.8, label=label)
+        cb = fig.colorbar(m, ax=ax, shrink=0.8, label=label)
+        if Z is result.height and hcb:
+            cb.set_ticks(hcb["ticks"]); cb.set_ticklabels(hcb["labels"])
         if truth is not None:
             ax.plot(truth.lon, truth.lat, "w-", lw=2.2)
             ax.plot(truth.lon, truth.lat, "k-", lw=0.8)
