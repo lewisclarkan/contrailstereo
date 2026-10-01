@@ -124,7 +124,10 @@ class StereoConfig:
     # ----- destriping (GOES-17) -----
     stripe_nsig: float = 4.0
     stripe_dilate: int = 1
-    stripe_mask: bool = True
+    stripe_mask: bool = False
+
+    # ----- validation -----
+    advect_truth: bool = True
 
 
     def __post_init__(self):
