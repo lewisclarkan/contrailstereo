@@ -173,15 +173,13 @@ def bbox_around(lat, lon, pad_lat=0.30, pad_lon=0.70) -> BBox:
 
 
 def make_grid(bbox, cfg: StereoConfig = DEFAULT) -> Grid:
-    """Retrieval grid over bbox"""
+    """Retrieval (output) grid over bbox"""
 
     bbox = BBox(*bbox)
 
-    if cfg.grid_kind == "latlon":
+    if cfg.grid_kind in ("latlon", "native"):
         return _latlon_grid(bbox, cfg)
-    if cfg.grid_kind == "native":
-        raise NotImplementedError("native satellite grid not implemented yet")
-    raise ValueError("unknown grid_king {cfg.grid_kind!r}")
+    raise NotImplementedError("native satellite grid not implemented yet")
 
 
 def _latlon_grid(bbox : BBox, cfg: StereoConfig) -> Grid:

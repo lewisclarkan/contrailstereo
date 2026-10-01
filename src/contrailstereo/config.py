@@ -95,7 +95,7 @@ class StereoConfig:
     psf_inflate:    float = 1.05
 
     # ----- grid -----
-    grid_kind: str = "latlon"       # "latlon" / "native" (planned)
+    grid_kind: str = "latlon"       # "latlon" / "native"
     px_km: float = 1.0 
     min_npx: int = 60
     max_npx: int = 750

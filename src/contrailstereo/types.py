@@ -22,6 +22,7 @@ from .config import GRID_KINDS, MODES
 
 if TYPE_CHECKING:
     from .data.abi_time import PixelClock
+    from .geometry import NativeGrid
 
 
 # ---------- vocab ----------
@@ -156,6 +157,22 @@ View = Callable[[np.ndarray, np.ndarray], np.ndarray]
 
 
 @dataclass(frozen=True, eq=False)
+class NativeRaster:
+    """A satellite's conditioned-input BTD on its own fixed grid, cropped to a case.
+
+    grid   : the crop's NativeGrid (apparent positions of pixel centres).
+    btd    : (ny, nx) float32 BTD [K]; NaN where masked (destriped rows).
+    t_s    : (ny, nx) scan time of every pixel [s after Frame.time] under
+             the frame's time model (constant for "nominal")."""
+
+    grid: "NativeGrid"
+    btd: np.ndarray
+    t_s: np.ndarray
+
+
+
+
+@dataclass(frozen=True, eq=False)
 class Frame:
     """One satellite's image at one time.
  
@@ -163,7 +180,8 @@ class Frame:
     domain : "C" (CONUS) or "F" (full disk).
     stripe : destriping diagnostics, e.g. {"max_score": .., "n_rows": ..}
     clock  : per-pixel scan times (data.abi_time.PixelClock or None)
-    s0     : seconds after clock.start at which time falls."""
+    s0     : seconds after clock.start at which time falls.
+    raster : the native pixel input, grid kind native only"""
 
     sat: int
     sat_lon: float
@@ -173,6 +191,7 @@ class Frame:
     stripe: dict = field(default_factory=dict)
     clock: Optional["PixelClock"] = None
     s0: float = 0.0
+    raster: Optional[NativeRaster] = None
  
     def __post_init__(self):
         object.__setattr__(self, "time", _utc(self.time))
@@ -197,6 +216,7 @@ class Result:
     s_eff   :
     ref_time: time the maps are valid at (the reference frame's time)
     wind    : WindProfile used to advect
+    native. : NativeMap on the reference view's own pixels
     diag    : scalar diagnostics."""
 
     case_id: str
@@ -211,6 +231,7 @@ class Result:
     config_hash: str = ""
     ref_time: Optional[pd.Timestamp] = None
     wind: Optional[WindProfile] = None
+    native : Optional[NativeMap] = None
 
     def __post_init__(self):
         if self.mode not in MODES:
@@ -221,3 +242,20 @@ class Result:
             a = getattr(self, name)
             if a is not None and a.shape != self.grid.shape:
                 raise ValueError(f"{name} shape {a.shape} != grid {self.grid.shape}")
+            
+
+@dataclass(frozen=True, eq=False)
+class NativeMap:
+    """Retrieval on the reference view's own pixels (before placement on the
+    output grid). All arrays (ny, nx) on ``grid``.
+
+    height, r, amp : as Result, per native pixel.
+    t_s            : scan time of each pixel [s after Result.ref_time].
+    win_px         : correlation window (rows, cols) in native pixels."""
+
+    grid: "NativeGrid"
+    height: np.ndarray
+    r: np.ndarray
+    amp: np.ndarray
+    t_s: np.ndarray
+    win_px: tuple
