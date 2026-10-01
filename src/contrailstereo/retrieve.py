@@ -49,7 +49,7 @@ def ref_key(cfg: StereoConfig):
 
 def other_key(cfg: StereoConfig):
     """Key of the other frame at the case time"""
-    return (_sats(cfg)[1], frame_offsets_min(cfg).index(0.0)))
+    return (_sats(cfg)[1], frame_offsets_min(cfg).index(0.0))
 
 
 def frames_signature(cfg: StereoConfig) -> tuple:
