@@ -109,7 +109,7 @@ def cmd_config(args):
         print(f"written to {cfg.to_file(args.write)}")
     p = load_paths()
     print("\npaths:")
-    for k in ("goes_cache", "era5_cache", "outputs", "collocations"):
+    for k in ("goes_cache", "era5_cache", "outputs", "collocations", "abi_time"):
         print(f"  {k:13s} {getattr(p, k)}")
     return 0
 
