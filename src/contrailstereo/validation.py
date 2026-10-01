@@ -5,7 +5,7 @@ around a Run -- one variant over a set of cases -- stored as
 
     {tag}_config.json     the full config (tag = name_hash)
     {tag}_cases.jsonl     one line per case: verdict + diagnostics
-    {tag}_profiles.csv    one row per truth point: top_km, h, r
+    {tag}_profiles.csv    one row per truth point: top_km, h, r (+ h_raw and the advection)
     {tag}_maps/           optional per-case height/r/amp netCDF
 
 Metrics
@@ -41,6 +41,7 @@ import numpy as np
 import pandas as pd
 
 from .config import StereoConfig, diff, load_paths
+from .geometry import advect_latlon
 from .retrieve import frames_signature, load_frames, retrieve, sample_at
 from .types import QC_DATA_INVALID, QC_ERROR, QC_OK, Case, Result
 
@@ -48,6 +49,7 @@ log = logging.getLogger(__name__)
 
 SPLIT_SALT = "contrailstereo-split-v1"
 PROFILE_COLS = ["case_id", "pid", "contrail", "lat", "lon", "top_km", "h", "r", "s_eff"]
+ADV_COLS = ["h_raw", "lat_adv", "lon_adv", "dt_s", "disp_km"]
 CONTRAIL_GAP_KM = 5.0     # consecutive truth points further apart start a new contrail
 
 
@@ -119,7 +121,7 @@ def load_run(out_dir, variant: Variant) -> Run:
     profiles = None
     if pp.exists():
         profiles = pd.read_csv(pp)
-        for col in ("s_eff", "contrail"):
+        for col in ("s_eff", "contrail", *ADV_COLS):
             if col not in profiles:
                 profiles[col] = np.nan
         profiles = (profiles[profiles.case_id.isin(cases.case_id)]
@@ -142,17 +144,50 @@ def contrail_ids(lat, lon, pid, gap_km=CONTRAIL_GAP_KM):
     return out
 
 
-def attach_truth(result: Result, case: Case, index="nearest") -> pd.DataFrame:
-    """Sample the result at the case's truth points (PROFILE_COLS): height,
-    r, s_eff, and the contrail each point belongs to."""
+def truth_times(result: Result, case:Case, index="nearest") -> pd.DataFrame:
+    """Lidar observation time of each case's truth points (PROFILE_COLS): height,
+    r, s_eff, and the contrail each point belongs to """
+
     t = case.truth
-    s = sample_at(result, t.lat, t.lon, index=index)
+    when = (pd.to_datetime(t["time"]).values if "time" in t
+            else np.full(len(t), np.datetime64(case.time)))
+    return when.astype("datetime64[ns]")
+
+
+def advected_truth(case: Case, t_map, wind):
+    """Truth positions carried from each profile's lidar time to the map time t_map.
+    Returns lat, lon, dt_s (map-lidar), disp_km."""
+
+    t = case.truth
+    dt = (np.datetime64(pd.Timestamp(t_map), "ns") - truth_times(case)) / np.timedelta64(1, "s")
+    h = t.top_km.values.astype(float)
+    u, v = np.interp(h, wind.h, wind.u), np.interp(h, wind.h, wind.v)
+    lat, lon = advect_latlon(t.lat.values, t.lon.values, u, v, dt)
+    return lat, lon, dt, np.hypot(u, v) * np.abs(dt) / 1e3
+
+
+def attach_truth(result:Result, case: Case, index="nearest",
+                 advect=True) -> pd.DataFrame:
+    """Sample the result at the case's truth points (PROFILE_COLS + ADV_COLS):
+    height, r, s_eff, and the contrail each point belongs to."""
+
+    t = case.truth
+    nan = np.full(len(t), np.nan)
+    lat_a = lon_a = dt = disp = nan
+    raw = sample_at(result, t.lat, t.lon, index=index)
+    s = raw
+
+    if advect and result.wind is not None and result.ref_time is not None:
+        lat_a, lon_a, dt, disp = advected_truth(case, result.ref_time, result.wind)
+        s = sample_at(result, lat_a, lon_a, index=index)
     return pd.DataFrame(dict(case_id=case.id, pid=t.index.values,
                              contrail=contrail_ids(t.lat.values, t.lon.values,
-                                                   t.index.values),
+                                                  t.index.values),
                              lat=t.lat.values, lon=t.lon.values,
                              top_km=t.top_km.values, h=s.h.values,
-                             r=s.r.values, s_eff=s.s_eff.values))
+                             r=s.r.values, s_eff=s.s_eff.values,
+                             h_raw=raw.h.values, lat_adv=lat_a, lon_adv=lon_a,
+                             dt_s=dt, disp_km=disp))
 
 
 def _save_map(path: Path, result: Result):
@@ -239,9 +274,9 @@ def run(cases, variants, out_dir, paths=None, validate=True, save_maps=False,
                 res = retrieve(case, v.cfg, paths, frames=frames[sig])
                 row = dict(base, qc=res.qc, error=None, **res.diag)
                 if validate:
-                    prof = attach_truth(res, case, index)
+                    prof = attach_truth(res, case, index, v.cfg.advect_truth)
                     prof.to_csv(pp, mode="a", index=False,
-                                header=not pp.exists(), columns=PROFILE_COLS)
+                                header=not pp.exists(), columns=PROFILE_COLS + ADV_COLS)
                 if save_maps and res.height is not None:
                     safe = hashlib.sha1(case.id.encode()).hexdigest()[:12]
                     _save_map(mp / f"{safe}.nc", res)
@@ -313,7 +348,7 @@ def load_legacy_run(results_csv, profiles_csv, cases, name="v4") -> Run:
     m["contrail"] = 0
     for cid, g in m.groupby("case_id"):
         m.loc[g.index, "contrail"] = contrail_ids(g.lat.values, g.lon.values, g.pid.values)
-    prof = m[PROFILE_COLS]
+    prof = m[PROFILE_COLS].assign(**{c: np.nan for c in ADV_COLS})
     return Run(Variant(name, None), cases_df, prof.reset_index(drop=True))
 
 
