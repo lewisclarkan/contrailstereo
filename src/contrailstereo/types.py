@@ -13,12 +13,15 @@ Truth:      DataFrame with at least ``lat``, ``lon``, ``top_km``; its index
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Callable, NamedTuple, Optional
+from typing import Callable, NamedTuple, Optional, TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
 
 from .config import GRID_KINDS, MODES
+
+if TYPE_CHECKING:
+    from .data.abi_time import PixelClock
 
 
 # ---------- vocab ----------
@@ -158,7 +161,9 @@ class Frame:
  
     view   : samples the matching field at arbitrary (lat, lon).
     domain : "C" (CONUS) or "F" (full disk).
-    stripe : destriping diagnostics, e.g. {"max_score": .., "n_rows": ..}"""
+    stripe : destriping diagnostics, e.g. {"max_score": .., "n_rows": ..}
+    clock  : per-pixel scan times (data.abi_time.PixelClock or None)
+    s0     : seconds after clock.start at which time falls."""
 
     sat: int
     sat_lon: float
@@ -166,9 +171,19 @@ class Frame:
     view: View
     domain: str = "?"
     stripe: dict = field(default_factory=dict)
+    clock: Optional["PixelClock"] = None
+    s0: float = 0.0
  
     def __post_init__(self):
         object.__setattr__(self, "time", _utc(self.time))
+
+    def dt_at(self, lat, lon):
+        """Seconds betwen this frame's time and the scane time of the pixel that 
+        images the apparent position. NaN off the sector, 0 for a frame with no clock."""
+
+        if self.clock is None:
+            return np.zeros(np.shape(lat))
+        return self.clock.since_start(lat, lon) - self.s0
 
 # ---------- output ----------
 
@@ -180,6 +195,8 @@ class Result:
     r       : peak local correlation at each pixel.
     amp     : local feature amplitude of the reference view [K].
     s_eff   :
+    ref_time: time the maps are valid at (the reference frame's time)
+    wind    : WindProfile used to advect
     diag    : scalar diagnostics."""
 
     case_id: str
@@ -192,6 +209,8 @@ class Result:
     s_eff: Optional[np.ndarray] = None
     diag: dict = field(default_factory=dict)
     config_hash: str = ""
+    ref_time: Optional[pd.Timestamp] = None
+    wind: Optional[WindProfile] = None
 
     def __post_init__(self):
         if self.mode not in MODES:

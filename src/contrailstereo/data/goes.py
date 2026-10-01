@@ -68,6 +68,43 @@ def scan_time(ds) -> pd.Timestamp:
     """Nominal scan time of a CMIP dataset (UTC, tz-naive)."""
     return pd.Timestamp(ds["t"].values)
 
+_J2000 = pd.Timestamp("2000-01-01 T12:00:00")
+
+def _as_time(x) -> pd.Timestamp:
+    """UTC tz-native time from a datetime64, J2000 seconds, an ISO string or bytes"""
+
+    x = np.asarray(x).ravel()[0]
+    if isinstance(x, (bytes, np.bytes_)):
+        x = x.decode()
+    if isinstance(x, (int, float, np.integer, np.floating)):
+        return _J2000 + pd.to_timedelta(float(x), unit="s")
+    ts = pd.Timestamp(str(x)) if isinstance(x, str) else pd.Timestamp(x)
+    return ts.tz_convert("UTC").tz_localize(None) if ts.tz is not None else ts
+
+
+def scan_window(ds):
+    """(start, end) of the product's scan, or Non. With goes2go"""
+
+    cands = []
+    if "time_bounds" in ds.variables:
+        tb = np.asarray(ds["time_bounds"].values).ravel()
+        if tb.size == 2:
+            cands.append((tb[0], tb[1]))
+        keys = ("time_coverage_start", "time_coverage_end")
+        if set(keys) <= set(ds.variables):
+            cands.append(tuple(ds[k].values for k in keys))
+        if set(keys) <= set(ds.attrs):
+            cands.append(tuple(ds.attrs[k] for k in keys))
+        for a, b in cands:
+            try:
+                t0, t1 = _as_time(a), _as_time(b)
+            except(ValueError, TypeError):
+                continue
+            if t1 > t0:
+                return t0, t1
+
+    return None
+
 
 def fetch_channels(sat, channels, when, cache_dir):
     """Several channels of one satellite for the same scan.

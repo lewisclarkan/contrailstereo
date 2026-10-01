@@ -29,6 +29,9 @@ SAT_LON = {
 MODES = ("snapshot", "track")
 PREPS = ("hp", "psf_iso", "psf_minmtf")
 GRID_KINDS = ("latlon", "native")
+TIME_MODELS = ("nominal", "lut")
+REF_SATS = ("east", "west")
+ABI_TIME_VERSION = "09042020"
 
 # ---------- helpers ----------
 
@@ -114,6 +117,12 @@ class StereoConfig:
     max_offset_nowind_s: float = 8.0        # uncorrected offset limit: else offset
     wind_resid_max_km:   float = 0.25       # corrected residual limit: else offset
 
+    # ----- timing -----
+    time_mode: str= "lut"
+    ref_sat: str = "east"
+    abi_time_version: str = ABI_TIME_VERSION
+    abi_time_file: str = ""
+
     # ----- winds (in-scan advection) -----
     use_era5: bool = True
     wind_min_offset_s: float = 2.0      # below this, no correction needed
@@ -140,6 +149,10 @@ class StereoConfig:
             errs.append(f"mode {self.mode!r} not in {MODES}")
         if self.grid_kind not in GRID_KINDS:
             errs.append(f"grid_kind {self.grid_kind!r} not in {GRID_KINDS}")
+        if self.time_model not in TIME_MODELS:
+            errs.append(f"time_model {self.time_model!r} not in {TIME_MODELS}")
+        if self.ref_sat not in REF_SATS:
+            errs.append(f"ref_sat {self.ref_sat!r} not in {REF_SATS}")
         if self.prep not in PREPS:
             errs.append(f"prep {self.prep!r} not in {PREPS}")
         for s in (self.sat_east, self.sat_west):
@@ -278,9 +291,10 @@ class Paths:
     era5_cache: Path
     outputs: Path
     collocations: Optional[Path] = None
+    abi_time: Optional[Path] = None
 
 
-_PATH_FIELDS = ("goes_cache", "era5_cache", "outputs", "collocations")
+_PATH_FIELDS = ("goes_cache", "era5_cache", "outputs", "collocations", "abi_time")
 
 
 def _find_root(start: Path) -> Path:
@@ -311,7 +325,8 @@ def load_paths(config_file=None) -> Paths:
     defaults = dict(goes_cache=root / "data" / "goes_cache",
                     era5_cache=root / "data" / "era5_cache",
                     outputs=root / "outputs",
-                    collocations=root / "data" / "collocations.nc")
+                    collocations=root / "data" / "collocations.nc",
+                    abi_time=root / "data" / "abi")
     out = {}
     for name in _PATH_FIELDS:
         env = os.environ.get(f"CONTRAILSTEREO_{name.upper()}")
