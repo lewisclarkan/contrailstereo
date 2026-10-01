@@ -67,6 +67,7 @@ def lut_filename(sat: int, mode: int, domain: str, start) -> str:
     table, so the choice is immaterial there (G18 and G19 included). Mode 3 uses its own (3 CONUS
     instances). The G17 cooling timelines have no CONUS table, and G17
     full-disk Mode 3 is ambiguous between the normal and cooling timelines.
+    Mode 4: contingency mode
     Anything else raises LookupError; pass ``abi_time_file`` to choose."""
     start = pd.Timestamp(start)
     opts = f"sat={sat} mode={mode} domain={domain!r}"
@@ -88,7 +89,7 @@ def lut_filename(sat: int, mode: int, domain: str, start) -> str:
             return F_M3
         raise LookupError(f"{opts}: full-disk Mode 3 on the West satellite may be "
                           "the normal or the cooling timeline; set abi_time_file")
-    elif mode == 4 and domain == "F":
+    elif mode == 4:
         return F_M4
     raise LookupError(f"no Time Model table known for {opts}; set abi_time_file")
 
@@ -134,6 +135,27 @@ def load_lut(path, domain: str, start) -> np.ndarray:
                           "are full disk only)")
     k = (pd.Timestamp(start).minute % (5 * n)) // 5 + 1
     return _read(path, f"CONUS{k}_pixel_times")
+
+
+def crop_to_product(fd: np.ndarray, ds) -> np.ndarray:
+    """The part of a full-disk table covered by a product cut from that scan.
+
+    The full-disk fixed grid is centred on the sub-satellite point, so the
+    product's x/y axes give its offset in the table. Raises if the offset is
+    not a whole number of pixels or the product does not fit in the table."""
+    ny, nx = fd.shape
+    xs, ys = (np.asarray(ds[k].values, float) for k in ("x", "y"))
+    dx, dy = (xs[-1] - xs[0]) / (xs.size - 1), (ys[-1] - ys[0]) / (ys.size - 1)
+    c0, r0 = xs[0] / dx + (nx - 1) / 2, ys[0] / dy + (ny - 1) / 2
+    if abs(c0 - round(c0)) > 0.05 or abs(r0 - round(r0)) > 0.05:
+        raise ValueError(f"product grid is not aligned to the full-disk table "
+                         f"(offset {r0:.2f} rows, {c0:.2f} cols)")
+    r0, c0 = int(round(r0)), int(round(c0))
+    h, w = ds["y"].size, ds["x"].size
+    if r0 < 0 or c0 < 0 or r0 + h > ny or c0 + w > nx:
+        raise ValueError(f"product ({h}x{w}) at row {r0}, col {c0} falls outside "
+                         f"the {ny}x{nx} full-disk table")
+    return np.ascontiguousarray(fd[r0:r0 + h, c0:c0 + w])
 
 
 def band_shift_s(channels) -> float:
@@ -210,17 +232,20 @@ def pixel_clock(ds, sat: int, domain: str, channels, abi_dir, version=DEFAULT_VE
     mode = scan_mode(ds)
     fname = filename or lut_filename(sat, mode, domain, start)
     path = lut_path(abi_dir, version, fname)
-    lut = load_lut(path, domain, start)
+    cut_from_fd = domain == "C" and n_conus(path) == 0      # e.g. Mode 4: no CONUS table
+    lut = load_lut(path, "F" if cut_from_fd else domain, start)
+    span = float(lut.max() - lut.min())
+    if cut_from_fd:
+        lut = crop_to_product(lut, ds)
     ny, nx = ds["y"].size, ds["x"].size
     if lut.shape != (ny, nx):
         raise ValueError(f"{fname}: table is {lut.shape} but the G{sat} product is "
                          f"{(ny, nx)} ({domain!r}, mode {mode})")
-    span = float(lut.max() - lut.min())
     window_s = (end - start).total_seconds()
     if abs(window_s - span) > 10.0:
         warnings.warn(f"G{sat}: product window is {window_s:.0f} s but the table "
                       f"spans {span:.0f} s -- wrong timeline?")
     info = dict(file=fname, version=version, mode=mode, window_s=window_s,
-                table_span_s=span)
+                table_span_s=span, cut_from_full_disk=cut_from_fd)
     return PixelClock(start=start, lut=lut, shift_s=band_shift_s(channels),
                       _locate=_locator(ds), info=info)
