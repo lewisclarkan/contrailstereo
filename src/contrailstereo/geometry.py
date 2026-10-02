@@ -242,6 +242,10 @@ def _footprint_xy(p, H, sat, bbox, h_range_km):
     return np.concatenate(xs), np.concatenate(ys)
 
 
+class OutsideSector(ValueError):
+    """The case bbox does not overlap the dataset's sector (e.g. off CONUS)."""
+
+
 class NativeGrid:
     """One satellite's ABI fixed grid, cropped to a case.
     
@@ -257,7 +261,8 @@ class NativeGrid:
         self.y_rad = np.asarray(y_rad, float)
 
         if self.x_rad.size < 3 or self.y_rad.size < 3:
-            raise ValueError("native grid must have at least 3 x 3 pixels")
+            raise OutsideSector("bbox is outside this dataset's sector")
+
         
         self.dx = float(self.x_rad[1] - self.x_rad[0])
         self.dy = float(self.y_rad[1] - self.y_rad[0])
@@ -274,94 +279,89 @@ class NativeGrid:
         self.alon = np.where(bad, np.nan, lon)
         self.shape = X.shape
 
-        @classmethod
-        def from_dataset(cls, ds, sat, bbox, h_range_km, pad_km=10.0):
-            """Crop an ABI to a bbox at every height in h_range_ with pad pad_km.
-            
-            Returns (NativeGrid, (row_slice, col_slice)) so the caller can crops its
-            arrays in the same way."""
-
-            pj = ds["goes_imager_projection"]
-            H = float(pj["perspective_point_height"])
-            lon0 = float(pj.attrs["longitude_of_project_origin"])
-            sweep = pj.attrs.get("sweep_angle_axis", "x")
-
-            p = Proj(proj="geos", h=H, lon_0=lon0, sweep=sweep, a=R_EQ, b=R_POL)
-            xs, ys = _footprint_xy(p, H, sat, bbox, h_range_km)
-            pad = pad_km / 37000.0
-
-            x, y = ds["x"].values, ds["y"].values
-            jj = np.where((x >= xs.min() - pad) & (x <= xs.max() + pad))[0]
-            ii = np.where((y >= ys.min() - pad) & (y <= ys.max() + pad))[0]
-
-            if jj.size == 0 or ii.size == 0:
-                raise ValueError("bbox is outside this dataset's sector")
-            
-            isl = slice(int(ii.min()), int(ii.max()) + 1)
-            jsl = slice(int(jj.min()), int(jj.max()) + 1)
-
-            return cls(x[jsl], y[isl], SAT_LON[sat], H, lon0, sweep), (isl, jsl)
+    @classmethod
+    def from_dataset(cls, ds, sat, bbox, h_range_km, pad_km=10.0):
+        """Crop an ABI to a bbox at every height in h_range_ with pad pad_km.
         
+        Returns (NativeGrid, (row_slice, col_slice)) so the caller can crops its
+        arrays in the same way."""
 
-        def true_at(self, h_km):
-            """True lat/lon of the apparent pixel centres at height h_km"""
-            
-            tlat, tlon = true_latlon_from_apparent(self.alat, self.alon, 
-                                                   h_km * 1e3, self.sat_lon)
-            return tlat, tlon
+        pj = ds["goes_imager_projection"]
+        H = float(pj.attrs["perspective_point_height"])
+        lon0 = float(pj.attrs["longitude_of_projection_origin"])
+        sweep = pj.attrs.get("sweep_angle_axis", "x")
+
+        p = Proj(proj="geos", h=H, lon_0=lon0, sweep=sweep, a=R_EQ, b=R_POL)
+        xs, ys = _footprint_xy(p, H, sat, bbox, h_range_km)
+        pad = pad_km / 37000.0
+
+        x, y = ds["x"].values, ds["y"].values
+        jj = np.where((x >= xs.min() - pad) & (x <= xs.max() + pad))[0]
+        ii = np.where((y >= ys.min() - pad) & (y <= ys.max() + pad))[0]
+
+        if jj.size == 0 or ii.size == 0:
+            raise ValueError("bbox is outside this dataset's sector")
         
+        isl = slice(int(ii.min()), int(ii.max()) + 1)
+        jsl = slice(int(jj.min()), int(jj.max()) + 1)
 
-        def rc(self, lat, lon):
-            """Fractional (row, col) of apparent ground positions"""
+        return cls(x[jsl], y[isl], SAT_LON[sat], H, lon0, sweep), (isl, jsl)
+    
 
-            lat, lon = np.asarray(lat, float), np.asarray(lon, float)
+    def true_at(self, h_km):
+        """True (lat, lon) of every pixel for a cloud at h_km."""
+        tlat, tlon, _ = true_latlon_from_apparent(self.alat, self.alon,
+                                                  h_km * 1e3, self.sat_lon)
+        return tlat, tlon
+    
 
-            x, y = self.p(lon.ravel(), lat.ravel(), errcheck=False)
-            x, y = np.asarray(x, float), np.asarray(y, float)
+    def rc(self, lat, lon):
+        """Fractional (row, col) of apparent ground positions; NaN off the
+        projection."""
+        lat, lon = np.asarray(lat, float), np.asarray(lon, float)
+        x, y = self.p(lon.ravel(), lat.ravel(), errcheck=False)
+        x, y = np.asarray(x, float), np.asarray(y, float)
+        bad = ~(np.isfinite(x) & np.isfinite(y)
+                & (np.abs(x) < 1e20) & (np.abs(y) < 1e20))
+        col = np.where(bad, np.nan, (x / self.H - self.x_rad[0]) / self.dx)
+        row = np.where(bad, np.nan, (y / self.H - self.y_rad[0]) / self.dy)
+        return row.reshape(lat.shape), col.reshape(lat.shape)
+    
 
-            bad = ~(np.isfinite(x) & np.isfinite(y) & 
-                   (np.abs(x) < 1e20) & (np.abs(y) < 1e20))
-            
-            col = np.where(bad, np.nan, (x / self.H - self.x_rad[0]) / self.dx)
-            row = np.where(bad, np.nan, (y / self.H - self.y_rad[0]) / self.dy)
+    def jacobian_km(self, h_km=11.0):
+        """d(north, east)/d(row, col) [km per pixel] at the grid centre for 
+        a cloud at h_km, and the pixel spacing [km] along the rows and columns."""
 
-            return row.reshape(lat.shape), col.reshape(lat.shape)
+        ic, jc = self.shape[0] // 2, self.shape[1] // 2
+        sl = np.s_[ic-1:ic+2, jc-1:jc+2]
+        tlat, tlon, _ = true_latlon_from_apparent(
+            self.alat[sl], self.alon[sl], h_km * 1e3, self.sat_lon)
+        c = np.cos(np.deg2rad(tlat[1,1]))
+
+        N = (tlat - tlat[1,1]) * KM_PER_DEG
+        Ee = (tlon - tlon[1,1]) * KM_PER_DEG * c
+
+        J = np.array([[(N[2,1] - N[0,1]) / 2, (N[1, 2] - N[1,0]) / 2],
+                        [(Ee[2,1] - Ee[0,1]) / 2, (Ee[1,2] - Ee[1,0]) / 2]])
         
+        return J, (float(np.hypot(J[0,0], J[1,0])), float(np.hypot(J[0,1], J[1,1])))
+    
 
-        def jacobian_km(self, h_km=11.0):
-            """d(north, east)/d(row, col) [km per pixel] at the grid centre for 
-            a cloud at h_km, and the pixel spacing [km] along the rows and columns."""
+    def filters(self, cfg: StereoConfig = DEFAULT, h_km=11.0):
+        """High pass sigma and correlation window in native pixels from the 
+        km scales of cfg (cf.km_filters) plus the Jacobian"""
 
-            ic, jc = self.shape[0] // 2, self.shape[1] // 2
-            sl = np.s_[ic-1:ic+2, jc-1:jc+2]
-            tlat, tlon, _ = true_latlon_from_apparent(
-                self.alat[sl], self.alon[sl], h_km * 1e3, self.sat_lon)
-            c = np.cos(np.deg2rad(tlat[1,1]))
+        J, (si, sj) = self.jacobian_km(h_km)
+        sig = (cfg.hp_sigma_km / si, cfg.hp_sigma_km / sj)
+        det = abs(np.linalg.det(J))
+        g = 1.0 / np.sqrt(det / (si * sj))
 
-            N = (tlat - tlat[1,1]) * KM_PER_DEG
-            Ee = (tlon - tlon[1,1]) * KM_PER_DEG * c
-
-            J = np.array([[N[2,1] - N[0,1] / 2, (N[1, 2] - N[1,0]) / 2],
-                          [(Ee[2,1] - Ee[0,1]) / 2, (Ee[1,2] - Ee[1,0]) / 2]])
-            
-            return J, (float(np.hypot(J[0,0], J[1,0])), float(np.hypot(J[0,1], J[1,1])))
+        def odd_pair(t):
+            lo = max(int(np.floor((t-1) / 2) * 2 + 1), 3)
+            return lo, lo + 2
         
-
-        def filters(self, cfg: StereoConfig = DEFAULT, h_km=11.0):
-            """High pass sigma and correlation window in native pixels from the 
-            km scales of cfg (cf.km_filters) plus the Jacobian"""
-
-            J, (si, sj) = self.jacobian_km(h_km)
-            sig = (cfg.hp_sigma_km / si, cfg.hp_sigma_km / sj)
-            det = abs(np.linalg.det(J))
-            g = 1.0 / np.sqrt(det / (si * sj))
-
-            def odd_pair(t):
-                lo = max(int(np.floor((t-1) / 2) * 2 + 1), 3)
-                return lo, lo + 2
-            
-            win = min(itertools.product(odd_pair(g * cfg.win_km / si),
-                                        odd_pair(g * cfg.win_km / sj)),
-                    key=lambda w: (abs(w[0] * w[1] * det / cfg.win_km ** 2 - 1),
-                                    abs(np.log(w[0] * si / (w[1] * sj)))))
-            return sig, win, J
+        win = min(itertools.product(odd_pair(g * cfg.win_km / si),
+                                    odd_pair(g * cfg.win_km / sj)),
+                key=lambda w: (abs(w[0] * w[1] * det / cfg.win_km ** 2 - 1),
+                                abs(np.log(w[0] * si / (w[1] * sj)))))
+        return sig, win, J

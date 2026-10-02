@@ -17,7 +17,7 @@ from scipy.ndimage import uniform_filter
 
 from .config import DEFAULT, SAT_LON, Paths, StereoConfig, load_paths
 from .data import era5, goes, abi_time
-from .geometry import (advect_latlon, apparent_surface_latlon, 
+from .geometry import (OutsideSector, advect_latlon, apparent_surface_latlon, 
                        km_filters, locate, make_grid, vza_deg)
 from .prep import btd_view, make_preps, observability
 from .types import (QC_COVERAGE, QC_NO_DATA, QC_OFFSET, QC_OK, Case, Frame,
@@ -25,6 +25,7 @@ from .types import (QC_COVERAGE, QC_NO_DATA, QC_OFFSET, QC_OK, Case, Frame,
 
 M_PER_DEG = 111.0e3          # advection shift, as pre-restructure
 QC_REF_H_KM = 10.0           # height at which valid overlap is judged
+VIEW_PAD_KM = 60.0      # margin around the case footprint kept from a full-disk product
 _FETCH = "fetch"
 
 
@@ -58,7 +59,7 @@ def frames_signature(cfg: StereoConfig) -> tuple:
     return (cfg.sat_east, cfg.sat_west, cfg.channels, frame_offsets_min(cfg),
             cfg.stripe_nsig, cfg.stripe_dilate, cfg.stripe_mask,
             cfg.time_model, cfg.abi_time_version, cfg.abi_time_file,
-            cfg.ref_sat)
+            cfg.grid_kind, cfg.ref_sat, cfg.h_lo_km, cfg.h_hi_km)
 
 
 def _abi_dir(paths: Paths):
@@ -69,11 +70,30 @@ def _abi_dir(paths: Paths):
     return paths.abi_time
 
 
+
+def _crop_to_case(da, db, sat, case, cfg):
+    """Both channels cut to the case footprint (+ VIEW_PAD_KM), as copies.
+
+    A full-disk product is ~29 M pixels per channel, a case needs a few
+    thousand, and the frame's view keeps its datasets alive. The footprint
+    covers every scanned height, so values inside it are unchanged."""
+    from .geometry import NativeGrid
+    try:
+        _, (isl, jsl) = NativeGrid.from_dataset(
+            da, sat, case.bbox, (cfg.h_lo_km, cfg.h_hi_km), pad_km=VIEW_PAD_KM)
+    except OutsideSector:
+        return da, db                      # off the disk: the view will be NaN anyway
+    return tuple(d.isel(y=isl, x=jsl).copy(deep=True) for d in (da, db))
+
+
+
+
 def load_frames(case: Case, cfg: StereoConfig = DEFAULT,
                 paths: Paths | None = None) -> dict:
     """{(sat, k): Frame} for East and West at each frame offset."""
     paths = paths or load_paths()
     a, b = cfg.channels
+    ref_sat = _sats(cfg)[0]
     frames = {}
     for k, dt in enumerate(frame_offsets_min(cfg)):
         when = case.time + pd.Timedelta(minutes=dt)
@@ -100,9 +120,21 @@ def load_frames(case: Case, cfg: StereoConfig = DEFAULT,
                     raise ValueError(f"G{sat}: case anchor {case.anchor} is "
                                      "off the disk")
                 time = clock.start + pd.to_timedelta(s0, unit="s")
+
+            raster = None
+            if cfg.grid_kind == "native":
+                from . import native              # native imports this module
+                try:
+                    raster = native.native_raster(da, db, sat, case.bbox, cfg,
+                                                  clock, s0, is_ref=sat == ref_sat)
+                except OutsideSector:
+                    pass          # case off this sector: retrieve() reports no data
+            if dom == "F":                        # keep only the case, not the disk
+                da, db = _crop_to_case(da, db, sat, case, cfg)
             frames[(sat, k)] = Frame(sat=sat, sat_lon=SAT_LON[sat], time=time,
-                                      view=btd_view(da, db), domain=dom,
-                                     stripe=stripe, clock=clock, s0=s0)
+                                     view=btd_view(da, db), domain=dom,
+                                     stripe=stripe, clock=clock, s0=s0,
+                                     raster=raster)
     return frames
 
 
@@ -319,6 +351,7 @@ def retrieve(case: Case, cfg: StereoConfig = DEFAULT, paths: Paths | None = None
         raise ValueError(f"unknown mode {cfg.mode!r}")
     if cfg.mode == "track":
         match_track(None, None, cfg, None, None)       # fail before loading
+    native_grid = cfg.grid_kind == "native"
 
     grid = make_grid(case.bbox, cfg)
     frames = frames if frames is not None else load_frames(case, cfg, paths)
@@ -344,12 +377,29 @@ def retrieve(case: Case, cfg: StereoConfig = DEFAULT, paths: Paths | None = None
         need = cfg.time_model == "lut" or abs(offset) >= cfg.wind_min_offset_s
         wind = load_winds(case, cfg, paths) if need else None
 
-    amp, valid_frac = m["amp"], m["valid_frac"]
-    diag.update(pinfo)
+    diag.update(dt_stats(ref, oth, grid))
 
-    preps, pinfo = make_preps(grid, (E, W), cfg)
-    m = MATCHERS[cfg.mode](frames, grid, cfg, preps, wind)
-    H, rmax = height_map(m["hs"], m["R"], m["amp"], cfg)
+    nmap = None
+    if native_grid:
+        from . import native                     # native imports this module
+        if cfg.mode != "snapshot":
+            raise NotImplementedError("grid_kind='native' is snapshot-only")
+        nmap, valid_frac = native.match_native(ref, oth, cfg, wind, case.bbox)
+        if ref.raster is None or oth.raster is None:      # bbox off a sector
+            H = rmax = amp = np.full(grid.shape, np.nan, np.float32)
+            valid_frac = 0.0
+        else:
+            nmap, valid_frac = native.match_native(ref, oth, cfg, wind, case.bbox)
+            placed = native.native_to_grid(nmap, grid, wind)
+            H, rmax, amp = placed["height"], placed["r"], placed["amp"]
+            diag.update(native.diag(nmap, cfg))
+    else:
+        preps, pinfo = make_preps(grid, (E, W), cfg)
+        m = MATCHERS[cfg.mode](frames, grid, cfg, preps, wind)
+        H, rmax = height_map(m["hs"], m["R"], m["amp"], cfg)
+        amp, valid_frac = m["amp"], m["valid_frac"]
+        diag.update(pinfo)
+    
     s_eff, odiag = case_observability(frames, grid, H, cfg)
     if cfg.obs_min_s_eff > 0:
         H = np.where(s_eff >= cfg.obs_min_s_eff, H, np.nan)
@@ -361,7 +411,7 @@ def retrieve(case: Case, cfg: StereoConfig = DEFAULT, paths: Paths | None = None
     return Result(case.id, cfg.mode, qc, grid, height=H, r=rmax,
                   amp=amp, s_eff=s_eff, diag=diag,
                   config_hash=cfg.config_hash(), ref_time=ref.time,
-                  wind=wind)
+                  wind=wind, native=nmap)
 
 
 # ======================================================================

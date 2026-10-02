@@ -172,6 +172,7 @@ def match_native(ref: Frame, oth: Frame, cfg: StereoConfig = DEFAULT, wind=None,
                             & (tlon >= lo0) & (tlon <= lo1)]
             valid = float(both.mean()) if both.size else 0.0
     H, rmax = height_map(hs, Rc, amp, cfg)
+
     return NativeMap(grid=A.grid, height=H.astype(np.float32),
                      r=rmax.astype(np.float32), amp=amp.astype(np.float32),
                      t_s=t_A.astype(np.float32), win_px=tuple(win)), valid

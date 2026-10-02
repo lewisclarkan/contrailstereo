@@ -144,10 +144,9 @@ def contrail_ids(lat, lon, pid, gap_km=CONTRAIL_GAP_KM):
     return out
 
 
-def truth_times(result: Result, case:Case, index="nearest") -> pd.DataFrame:
-    """Lidar observation time of each case's truth points (PROFILE_COLS): height,
-    r, s_eff, and the contrail each point belongs to """
-
+def truth_times(case: Case) -> np.ndarray:
+    """Lidar observation time of each truth point (datetime64[ns]); the case
+    time where the truth has no ``time`` column."""
     t = case.truth
     when = (pd.to_datetime(t["time"]).values if "time" in t
             else np.full(len(t), np.datetime64(case.time)))

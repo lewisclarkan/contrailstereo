@@ -230,7 +230,15 @@ def pixel_clock(ds, sat: int, domain: str, channels, abi_dir, version=DEFAULT_VE
                            "product; refusing to guess the pixel times")
     start, end = win
     mode = scan_mode(ds)
-    fname = filename or lut_filename(sat, mode, domain, start)
+    must_match = False
+    try:
+        fname = filename or lut_filename(sat, mode, domain, start)
+    except LookupError:
+        # G17 full-disk Mode 3 is the normal timeline or a cooling one: take the
+        # normal table, but only if the product's own scan window agrees with it
+        if filename or not (sat in WEST and mode == 3 and domain == "F"):
+            raise
+        fname, must_match = F_M3, True
     path = lut_path(abi_dir, version, fname)
     cut_from_fd = domain == "C" and n_conus(path) == 0      # e.g. Mode 4: no CONUS table
     lut = load_lut(path, "F" if cut_from_fd else domain, start)
@@ -242,6 +250,10 @@ def pixel_clock(ds, sat: int, domain: str, channels, abi_dir, version=DEFAULT_VE
         raise ValueError(f"{fname}: table is {lut.shape} but the G{sat} product is "
                          f"{(ny, nx)} ({domain!r}, mode {mode})")
     window_s = (end - start).total_seconds()
+    if must_match and abs(window_s - span) > 10.0:
+        raise LookupError(f"G{sat} full-disk Mode 3: the product window ({window_s:.0f} s) "
+                          f"does not match the normal table ({span:.0f} s), so this is "
+                          "probably a cooling timeline; set abi_time_file")
     if abs(window_s - span) > 10.0:
         warnings.warn(f"G{sat}: product window is {window_s:.0f} s but the table "
                       f"spans {span:.0f} s -- wrong timeline?")

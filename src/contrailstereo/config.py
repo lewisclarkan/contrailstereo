@@ -118,7 +118,7 @@ class StereoConfig:
     wind_resid_max_km:   float = 0.25       # corrected residual limit: else offset
 
     # ----- timing -----
-    time_mode: str= "lut"
+    time_model: str= "lut"
     ref_sat: str = "east"
     abi_time_version: str = ABI_TIME_VERSION
     abi_time_file: str = ""
